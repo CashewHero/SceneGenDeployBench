@@ -22,7 +22,7 @@ networks:
 services:
   orchestrator:
     build:
-      context: ./orchestrator
+      context: ../orchestrator
     image: ghcr.io/cashewhero/scenegendeploybench-orchestrator:${ORCHESTRATOR_VERSION:-latest}
     user: "${UID:-0}:${GID:-0}"
     group_add:

@@ -21,7 +21,7 @@ from storage.db import (
     DatabaseUnavailableError,
     claim_pending_batch,
     ensure_schema,
-    sync_reference_state,
+    sync_runner_state,
     update_batch_runner_endpoint,
 )
 from execution.dispatch import dispatch_batch
@@ -310,7 +310,7 @@ def run_service(host: str, port: int, config_path: str | None) -> None:
     for attempt in range(1, STARTUP_DB_MAX_ATTEMPTS + 1):
         try:
             ensure_schema(config)
-            sync_reference_state(config)
+            sync_runner_state(config)
             break
         except Exception as exc:
             log = (

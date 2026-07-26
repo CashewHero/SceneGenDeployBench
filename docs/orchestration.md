@@ -2,7 +2,7 @@
 
 ## Service
 
-The long-lived orchestrator synchronizes catalog and dataset state, reconciles pipelines, claims pending jobs, dispatches batches, and persists results.
+The long-lived orchestrator synchronizes the runner catalog, reconciles pipelines, claims pending jobs, dispatches batches, and persists results.
 
 Service endpoints:
 

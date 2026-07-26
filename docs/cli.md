@@ -17,7 +17,7 @@ deploybench serve [--host <host>] [--port <port>]
 deploybench run [<script>] --image <image> [options] [-- <command-or-arguments>]
 deploybench config show|validate|sources
 deploybench runner list|show|status
-deploybench dataset list|show|download
+deploybench dataset list|show|download|rescan
 deploybench job add|list|show|update|cancel
 deploybench batch list|show
 deploybench output list|show
@@ -93,9 +93,12 @@ deploybench dataset list
 deploybench dataset list testset1/subset
 deploybench dataset show testset1 --sample
 deploybench dataset download tartanair-pano --runner tartanair --set mode=pano --set modality=image --set env=AbandonedFactory2
+deploybench dataset rescan tartanair-pano
 ```
 
 Dataset targets can be dataset names, subset paths, or sample paths.
+
+Run `dataset rescan <dataset>` after a downloader or another process changes that dataset, or omit the dataset name to rebuild the complete index.
 
 ## Jobs
 

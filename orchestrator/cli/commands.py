@@ -28,7 +28,8 @@ from storage.db import (
     fetch_sample_rows,
     insert_dataset_download_job,
     insert_jobs,
-    sync_reference_state,
+    sync_dataset_state,
+    sync_runner_state,
     update_jobs_allow_outside_window,
 )
 from domain.pipelines import (
@@ -210,10 +211,6 @@ def _job_records_from_rows(rows: list[dict[str, Any]]) -> list[JobRecordView]:
 
 def load_job_records(config: OrchestratorConfig, **filters: Any) -> list[JobRecordView]:
     return _job_records_from_rows(fetch_job_rows(config, **filters))
-
-
-def _refresh_reference_cache(config: OrchestratorConfig) -> None:
-    sync_reference_state(config)
 
 
 def resolve_job_record(records: list[JobRecordView], query: str) -> JobRecordView:
@@ -710,7 +707,7 @@ def show_batch(config_path: str | None, batch_id: str) -> dict[str, Any]:
 
 def list_runners(config_path: str | None) -> list[dict[str, Any]]:
     config = load_runtime_config(config_path)
-    _refresh_reference_cache(config)
+    sync_runner_state(config)
     usage_by_runner = {
         str(row.get("runner_selector") or ""): row
         for row in fetch_runner_usage_rows(config)
@@ -737,7 +734,7 @@ def list_runners(config_path: str | None) -> list[dict[str, Any]]:
 
 def show_runner(config_path: str | None, runner_selector: str) -> dict[str, Any]:
     config = load_runtime_config(config_path)
-    _refresh_reference_cache(config)
+    sync_runner_state(config)
     runner = resolve_runner(config, runner_selector)
     job_counts = fetch_job_summary(config, runner_selector=runner.selector)
     cached_runner = next(iter(fetch_runner_rows(config, selector=runner.selector)), None)
@@ -780,7 +777,6 @@ def get_runner_status(config_path: str | None, runner_selector: str) -> dict[str
 
 def list_datasets(config_path: str | None, target: str | None = None) -> list[dict[str, Any]]:
     config = load_runtime_config(config_path)
-    _refresh_reference_cache(config)
     dataset_target = (target or "").strip()
     if dataset_target:
         parsed_target = DatasetTarget.parse(dataset_target)
@@ -860,7 +856,6 @@ def list_datasets(config_path: str | None, target: str | None = None) -> list[di
 
 def show_dataset(config_path: str | None, target: str) -> dict[str, Any]:
     config = load_runtime_config(config_path)
-    _refresh_reference_cache(config)
     dataset_target = DatasetTarget.parse(target)
     samples = [
         sample for sample in fetch_sample_rows(config, dataset=target)
@@ -898,7 +893,6 @@ def show_dataset(config_path: str | None, target: str) -> dict[str, Any]:
 
 def list_dataset_samples(config_path: str | None, target: str) -> list[dict[str, Any]]:
     config = load_runtime_config(config_path)
-    _refresh_reference_cache(config)
     dataset_target = DatasetTarget.parse(target)
     samples = [
         sample for sample in fetch_sample_rows(config, dataset=target)
@@ -938,7 +932,6 @@ def list_outputs(
     runner: str | None = None,
 ) -> list[dict[str, Any]]:
     config = load_runtime_config(config_path)
-    _refresh_reference_cache(config)
     runner_name_filter, runner_selector_filter = _runner_filter_values(config, runner)
     groups: dict[tuple[str, str, str], dict[str, Any]] = {}
     for row in fetch_output_sample_index_rows(
@@ -979,7 +972,6 @@ def list_outputs(
 
 def show_output(config_path: str | None, target: str) -> dict[str, Any]:
     config = load_runtime_config(config_path)
-    _refresh_reference_cache(config)
     rows = fetch_output_sample_index_rows(config, target=target)
     data_types: list[str] = []
     samples: list[dict[str, Any]] = []
@@ -1139,6 +1131,15 @@ def download_dataset(
     return payload
 
 
+def rescan_datasets(
+    config_path: str | None,
+    *,
+    dataset_name: str | None,
+) -> dict[str, int | str | None]:
+    config = load_runtime_config(config_path)
+    return sync_dataset_state(config, dataset_name=dataset_name)
+
+
 def run_script(
     config_path: str | None,
     *,
@@ -1257,7 +1258,7 @@ def add_pipeline(
 
     config = load_runtime_config(config_path)
     ensure_schema(config)
-    sync_reference_state(config)
+    sync_runner_state(config)
     path = resolve_pipeline_path(
         config.catalogs.pipelines,
         name=name,

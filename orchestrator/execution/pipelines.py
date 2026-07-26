@@ -15,7 +15,7 @@ from domain.pipelines import (
     stage_dependencies,
 )
 from execution.script_run import run_script_container
-from storage.db import _primary_role_data, _target_sample_rows, sync_reference_state
+from storage.db import _primary_role_data, _target_sample_rows
 from storage.pipelines import (
     claim_pipeline_script_stage_execution,
     fail_pipeline_run,
@@ -679,9 +679,6 @@ def _materialize_runner_stage(
             f"runner stage {stage_id!r} using {runner.selector} requires "
             "inputs.data or inputs.candidate"
         )
-    if not existing:
-        # A preceding script may have created or filtered a dataset manifest.
-        sync_reference_state(config)
     primary_expression = resolve_static_value(
         configured_inputs[primary_role],
         dataset=str(run["dataset_target"]),

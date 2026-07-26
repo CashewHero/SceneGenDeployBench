@@ -569,14 +569,41 @@ def ensure_schema(config: OrchestratorConfig) -> None:
             cur.execute(SCHEMA_SQL)
 
 
-def sync_reference_state(config: OrchestratorConfig) -> dict[str, int]:
+def sync_runner_state(config: OrchestratorConfig) -> dict[str, int]:
     with connect_database(config) as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT pg_advisory_xact_lock(hashtext('scenegendeploybench:sync_reference_state'))")
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext('scenegendeploybench:sync_runner_state'))")
             cur.execute(SCHEMA_SQL)
             runner_count = _sync_runners(cur, config)
-            sample_count = _sync_samples(cur, config)
-    return {"runner_count": runner_count, "sample_count": sample_count}
+    return {"runner_count": runner_count}
+
+
+def sync_dataset_state(
+    config: OrchestratorConfig,
+    *,
+    dataset_name: str | None = None,
+) -> dict[str, int | str | None]:
+    normalized_dataset_name = (
+        dataset_name.strip().strip("/") if dataset_name is not None else None
+    )
+    if normalized_dataset_name == "":
+        raise ValueError("dataset name cannot be empty")
+    if normalized_dataset_name and "/" in normalized_dataset_name:
+        raise ValueError("dataset rescan accepts a dataset name, not a subset path")
+    with connect_database(config) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext('scenegendeploybench:sync_dataset_state'))")
+            cur.execute(SCHEMA_SQL)
+            dataset_count, sample_count = _sync_samples(
+                cur,
+                config,
+                dataset_name=normalized_dataset_name,
+            )
+    return {
+        "dataset": normalized_dataset_name,
+        "dataset_count": dataset_count,
+        "sample_count": sample_count,
+    }
 
 
 def _sync_runners(cur, config: OrchestratorConfig) -> int:
@@ -632,11 +659,23 @@ def _sync_runners(cur, config: OrchestratorConfig) -> int:
     return len(selectors)
 
 
-def _sync_samples(cur, config: OrchestratorConfig) -> int:
+def _sync_samples(
+    cur,
+    config: OrchestratorConfig,
+    *,
+    dataset_name: str | None = None,
+) -> tuple[int, int]:
     now = utc_now_timestamp()
     sample_keys: set[tuple[str, str, str]] = set()
-    for dataset_name in _list_dataset_names(config):
-        for sample in discover_samples(config, dataset_name=dataset_name):
+    available_dataset_names = _list_dataset_names(config)
+    if dataset_name is None:
+        dataset_names = available_dataset_names
+    elif dataset_name in available_dataset_names:
+        dataset_names = [dataset_name]
+    else:
+        dataset_names = []
+    for current_dataset_name in dataset_names:
+        for sample in discover_samples(config, dataset_name=current_dataset_name):
             key = (sample.dataset_name, sample.dataset_version, sample.external_key)
             sample_keys.add(key)
             cur.execute(
@@ -672,7 +711,17 @@ def _sync_samples(cur, config: OrchestratorConfig) -> int:
                 ),
             )
 
-    cur.execute("SELECT dataset_name, dataset_version, external_key FROM samples")
+    if dataset_name is None:
+        cur.execute("SELECT dataset_name, dataset_version, external_key FROM samples")
+    else:
+        cur.execute(
+            """
+            SELECT dataset_name, dataset_version, external_key
+            FROM samples
+            WHERE dataset_name = %s
+            """,
+            (dataset_name,),
+        )
     existing = {(row["dataset_name"], row["dataset_version"], row["external_key"]) for row in cur.fetchall()}
     stale = existing - sample_keys
     if stale:
@@ -684,7 +733,7 @@ def _sync_samples(cur, config: OrchestratorConfig) -> int:
             """,
             [(now, now, dataset_name, dataset_version, external_key) for dataset_name, dataset_version, external_key in stale],
         )
-    return len(sample_keys)
+    return len(dataset_names), len(sample_keys)
 
 
 def _job_where_clauses(
@@ -1260,7 +1309,12 @@ def _target_sample_rows(
             if parsed.matches(row["dataset_name"], row["external_key"])
         ]
     if not rows:
-        raise ValueError(f"{option_name} {target!r} matched no samples")
+        if is_output:
+            raise ValueError(f"{option_name} {target!r} matched no output samples")
+        raise ValueError(
+            f"{option_name} {target!r} matched no indexed samples; "
+            f"run 'deploybench dataset rescan {dataset_name}'"
+        )
     return is_output, dataset_name or "", rows
 
 
@@ -1445,7 +1499,7 @@ def insert_jobs(
     source_job_id: str | None,
     allow_start_outside_window: bool,
 ) -> dict[str, Any]:
-    sync_reference_state(config)
+    sync_runner_state(config)
     dataset_target = (dataset or "").strip()
     candidate_target = (candidate or "").strip()
     if not dataset_target and not candidate_target:
@@ -1694,7 +1748,7 @@ def insert_dataset_download_job(
     timeout_seconds: int,
     allow_start_outside_window: bool,
 ) -> dict[str, Any]:
-    sync_reference_state(config)
+    sync_runner_state(config)
     normalized_dataset_name = dataset_name.strip().strip("/")
     if not normalized_dataset_name:
         raise ValueError("dataset name is required")

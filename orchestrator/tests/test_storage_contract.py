@@ -3,11 +3,13 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app.config import load_config
+from main import build_parser
 from runner_launchers.base import RunnerLaunchContext
 from runner_launchers.docker import (
     DockerRunnerLauncher,
@@ -24,7 +26,9 @@ from storage.db import (
     DatabaseUnavailableError,
     _job_output_dir,
     connect_database,
+    insert_dataset_download_job,
     output_sample_payload,
+    sync_dataset_state,
 )
 
 
@@ -182,6 +186,72 @@ class StorageContractTests(unittest.TestCase):
                 with connect_database(config):
                     pass
         self.assertNotIn("raw connection details", str(raised.exception))
+
+    def test_dataset_rescan_command_accepts_one_dataset_or_all(self) -> None:
+        parser = build_parser()
+        targeted = parser.parse_args(["dataset", "rescan", "example_set1"])
+        complete = parser.parse_args(["dataset", "rescan"])
+        self.assertEqual(targeted.dataset_name, "example_set1")
+        self.assertIsNone(complete.dataset_name)
+
+    def test_dataset_download_job_does_not_rescan_datasets(self) -> None:
+        config = load_config(str(self.config_path))
+        runner = config.runners["test_runner@0.1.0"]
+        cursor = Mock()
+        connection = Mock()
+        connection.cursor.return_value = nullcontext(cursor)
+        with (
+            patch.object(db_storage, "sync_runner_state") as sync_runners,
+            patch.object(db_storage, "sync_dataset_state") as sync_datasets,
+            patch.object(
+                db_storage,
+                "connect_database",
+                return_value=nullcontext(connection),
+            ),
+            patch.object(db_storage, "insert_resolved_job_row"),
+        ):
+            insert_dataset_download_job(
+                config,
+                dataset_name="example_set1",
+                runner=runner,
+                parameters={},
+                timeout_seconds=60,
+                allow_start_outside_window=False,
+            )
+        sync_runners.assert_called_once_with(config)
+        sync_datasets.assert_not_called()
+
+    def test_targeted_dataset_rescan_passes_only_that_dataset(self) -> None:
+        config = load_config(str(self.config_path))
+        cursor = Mock()
+        connection = Mock()
+        connection.cursor.return_value = nullcontext(cursor)
+        with (
+            patch.object(
+                db_storage,
+                "connect_database",
+                return_value=nullcontext(connection),
+            ),
+            patch.object(
+                db_storage,
+                "_sync_samples",
+                return_value=(1, 3),
+            ) as sync_samples,
+        ):
+            result = sync_dataset_state(config, dataset_name="example_set1")
+        sync_samples.assert_called_once_with(
+            cursor,
+            config,
+            dataset_name="example_set1",
+        )
+        self.assertEqual(
+            result,
+            {
+                "dataset": "example_set1",
+                "dataset_count": 1,
+                "sample_count": 3,
+            },
+        )
 
     def test_output_files_keep_sample_and_data_type_shape(self) -> None:
         outputs, data_types = output_sample_payload(

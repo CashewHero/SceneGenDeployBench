@@ -37,6 +37,7 @@ from cli.commands import (
     list_pipelines,
     list_runners,
     logger,
+    rescan_datasets,
     run_script,
     show_batch,
     show_dataset,
@@ -221,6 +222,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-outside-window",
         action="store_true",
         help="allow this job to start outside active windows",
+    )
+    dataset_rescan = dataset_subparsers.add_parser(
+        "rescan",
+        help="refresh the durable sample index from dataset manifests",
+    )
+    dataset_rescan.add_argument(
+        "dataset_name",
+        nargs="?",
+        help="dataset name to rescan; omit to rescan every dataset",
     )
 
     batch_parser = subparsers.add_parser("batch", help="inspect durable batches")
@@ -580,6 +590,22 @@ def handle_dataset_download(args: argparse.Namespace) -> int:
             for row in payload["job_rows"]
         ]
         print(render_table(["JOB", "DATASET", "RUNNER", "STATE", "ATTEMPT", "UPDATED"], table_rows))
+    return 0
+
+
+def handle_dataset_rescan(args: argparse.Namespace) -> int:
+    payload = rescan_datasets(
+        args.config,
+        dataset_name=args.dataset_name,
+    )
+    if output_format(args, "text") == "json":
+        print_json(payload)
+        return 0
+    print(render_key_value([
+        ("Dataset", payload["dataset"] or "all"),
+        ("Datasets Scanned", payload["dataset_count"]),
+        ("Samples Indexed", payload["sample_count"]),
+    ]))
     return 0
 
 
@@ -1144,6 +1170,8 @@ def dispatch_command(parser: argparse.ArgumentParser, args: argparse.Namespace) 
             return handle_dataset_list(args)
         if args.dataset_command == "download":
             return handle_dataset_download(args)
+        if args.dataset_command == "rescan":
+            return handle_dataset_rescan(args)
         return handle_dataset_show(args)
     if args.command == "batch":
         if args.batch_command == "list":
