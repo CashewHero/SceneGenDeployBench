@@ -25,6 +25,10 @@ except ModuleNotFoundError:
 PENDING_CANDIDATE_LIMIT = 1000
 
 
+class DatabaseUnavailableError(RuntimeError):
+    pass
+
+
 def _runner_input_datatypes(
     runner: RunnerDefinition,
     role: str,
@@ -534,14 +538,21 @@ def _delete_output_sample(cur, job_id: str) -> None:
 @contextmanager
 def connect_database(config: OrchestratorConfig):
     _require_psycopg()
-    conn = psycopg.connect(
-        host=config.database.host,
-        port=config.database.port,
-        dbname=config.database.name,
-        user=config.database.user,
-        password=config.database.password,
-        row_factory=dict_row,
-    )
+    try:
+        conn = psycopg.connect(
+            host=config.database.host,
+            port=config.database.port,
+            dbname=config.database.name,
+            user=config.database.user,
+            password=config.database.password,
+            row_factory=dict_row,
+        )
+    except psycopg.OperationalError as exc:
+        raise DatabaseUnavailableError(
+            "Database unavailable at "
+            f"{config.database.host}:{config.database.port}/{config.database.name}. "
+            "Check that PostgreSQL is running and reachable, then retry."
+        ) from exc
     try:
         yield conn
         conn.commit()

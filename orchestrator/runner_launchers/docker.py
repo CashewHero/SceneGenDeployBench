@@ -2,15 +2,20 @@ from __future__ import annotations
 
 import http.client
 import json
+import logging
 import os
 import re
 import socket
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import quote
 
 from .base import RunnerLaunchContext
+
+
+logger = logging.getLogger("scenegendeploybench.docker")
 
 
 class _UnixSocketHTTPConnection(http.client.HTTPConnection):
@@ -131,7 +136,22 @@ class _DockerEngineClient:
     def ensure_image(self, image: str) -> bool:
         if self.image_exists(image):
             return False
-        self.pull_image(image)
+        logger.info(
+            "Docker image %s is not available locally; pulling it now. "
+            "The first startup may take several minutes.",
+            image,
+        )
+        started = time.monotonic()
+        try:
+            self.pull_image(image)
+        except Exception as exc:
+            logger.error("Docker image pull failed for %s: %s", image, exc)
+            raise
+        logger.info(
+            "Docker image pull completed for %s in %.1f seconds.",
+            image,
+            time.monotonic() - started,
+        )
         return True
 
     def ping(self) -> None:

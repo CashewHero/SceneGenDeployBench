@@ -17,7 +17,13 @@ from cli.commands import (
     resolve_runner,
     show_config_payload,
 )
-from storage.db import claim_pending_batch, ensure_schema, sync_reference_state, update_batch_runner_endpoint
+from storage.db import (
+    DatabaseUnavailableError,
+    claim_pending_batch,
+    ensure_schema,
+    sync_reference_state,
+    update_batch_runner_endpoint,
+)
 from execution.dispatch import dispatch_batch
 from execution.pipelines import reconcile_pipelines
 from execution.script_run import remove_script_containers
@@ -279,7 +285,12 @@ def scheduler_loop(server: "OrchestratorHTTPServer") -> None:
                 }
             )
         except Exception as exc:
-            logger.exception(event_message("scheduler_loop_failed", error=str(exc)))
+            log = (
+                logger.warning
+                if isinstance(exc, DatabaseUnavailableError)
+                else logger.exception
+            )
+            log(event_message("scheduler_loop_failed", error=str(exc)))
             server.orchestrator.finish_operation(
                 error={"message": str(exc), "type": exc.__class__.__name__}
             )
@@ -302,7 +313,12 @@ def run_service(host: str, port: int, config_path: str | None) -> None:
             sync_reference_state(config)
             break
         except Exception as exc:
-            logger.exception(
+            log = (
+                logger.warning
+                if isinstance(exc, DatabaseUnavailableError)
+                else logger.exception
+            )
+            log(
                 event_message(
                     "service_startup_db_check_failed",
                     attempt=attempt,

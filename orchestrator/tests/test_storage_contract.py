@@ -4,7 +4,8 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from app.config import load_config
 from runner_launchers.base import RunnerLaunchContext
@@ -18,7 +19,13 @@ from execution.script_run import (
     normalize_access,
     parse_environment,
 )
-from storage.db import _job_output_dir, output_sample_payload
+from storage import db as db_storage
+from storage.db import (
+    DatabaseUnavailableError,
+    _job_output_dir,
+    connect_database,
+    output_sample_payload,
+)
 
 
 SYSTEM_CONFIG = """
@@ -146,9 +153,35 @@ class StorageContractTests(unittest.TestCase):
         with (
             patch.object(_DockerEngineClient, "image_exists", return_value=False),
             patch.object(_DockerEngineClient, "pull_image") as pull_image,
+            self.assertLogs("scenegendeploybench.docker", level="INFO") as logs,
         ):
             self.assertTrue(client.ensure_image("example:0.1.0"))
             pull_image.assert_called_once_with("example:0.1.0")
+        self.assertIn("pulling it now", logs.output[0])
+        self.assertIn("pull completed", logs.output[1])
+
+    def test_database_connection_error_is_actionable(self) -> None:
+        config = load_config(str(self.config_path))
+
+        class FakeOperationalError(Exception):
+            pass
+
+        fake_psycopg = SimpleNamespace(
+            OperationalError=FakeOperationalError,
+            connect=Mock(side_effect=FakeOperationalError("raw connection details")),
+        )
+        with (
+            patch.object(db_storage, "psycopg", fake_psycopg),
+            patch.object(db_storage, "dict_row", object()),
+            patch.object(db_storage, "Jsonb", object()),
+        ):
+            with self.assertRaisesRegex(
+                DatabaseUnavailableError,
+                r"Database unavailable at 127\.0\.0\.1:5432/scenegendeploybench",
+            ) as raised:
+                with connect_database(config):
+                    pass
+        self.assertNotIn("raw connection details", str(raised.exception))
 
     def test_output_files_keep_sample_and_data_type_shape(self) -> None:
         outputs, data_types = output_sample_payload(
