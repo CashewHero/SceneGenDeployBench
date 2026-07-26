@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from runner_wrapper.files import publish_file
+from runner_wrapper.files import publish_directory, publish_file
 
 
 class PublishFileTests(unittest.TestCase):
@@ -44,3 +44,42 @@ class PublishFileTests(unittest.TestCase):
 
             self.assertEqual(destination.read_bytes(), b"scene data")
             self.assertFalse(any(destination.parent.glob("*.part")))
+
+
+class PublishDirectoryTests(unittest.TestCase):
+    def test_preserves_contents_and_metadata_when_supported(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source"
+            destination = root / "output"
+            source.mkdir()
+            sample = source / "sample.bin"
+            sample.write_bytes(b"dataset")
+            sample.chmod(0o640)
+            timestamp_ns = 1_700_000_000_123_456_789
+            os.utime(sample, ns=(timestamp_ns, timestamp_ns))
+
+            publish_directory(source, destination)
+
+            copied = destination / "sample.bin"
+            self.assertEqual(copied.read_bytes(), b"dataset")
+            self.assertEqual(stat.S_IMODE(copied.stat().st_mode), 0o640)
+            self.assertEqual(copied.stat().st_mtime_ns, timestamp_ns)
+
+    def test_keeps_contents_when_metadata_is_unsupported(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source"
+            destination = root / "output"
+            (source / "nested").mkdir(parents=True)
+            (source / "nested" / "sample.bin").write_bytes(b"dataset")
+
+            error = PermissionError(errno.EPERM, "Operation not permitted")
+            with (
+                mock.patch("runner_wrapper.files.shutil.copystat", side_effect=error),
+                self.assertLogs("runner_wrapper.files", level="WARNING") as logs,
+            ):
+                publish_directory(source, destination)
+
+            self.assertEqual((destination / "nested" / "sample.bin").read_bytes(), b"dataset")
+            self.assertEqual(len(logs.output), 1)
