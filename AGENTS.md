@@ -123,6 +123,8 @@ The semantic data type reported by a producer must be the type required by its c
 
 Keep heavyweight or mutable weights in the shared model cache unless licensing or reproducibility requires image-bundled public assets. Make automatic downloads concurrency-safe and deterministic. Document required tokens without committing them.
 
+If the runner will have a large image build, change the github image workflow cache from `mode=max` to `mode=min`.
+
 Use the catalog `launcher.env` for model mode, checkpoint selection, thresholds, backend flags, and paths. Use `env_passthrough` only for values supplied by deployment, such as credentials.
 
 The HTTP process must become ready without loading per-job inputs. Load expensive reusable model state at startup only when that model benefits from it and failures remain clear.
