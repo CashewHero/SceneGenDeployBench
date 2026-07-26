@@ -1,0 +1,63 @@
+# env:
+# PATH_DATASETS
+# PATH_MODEL_CACHE
+# PATH_OUTPUT
+# PATH_PIPELINES
+# PATH_POSTGRES_DATA
+# PATH_CONFIG
+# ORCHESTRATOR_VERSION
+# ORCHESTRATOR_PORT default 58080
+# UID/GID default 0
+# DOCKER_GID optional, default to GID
+# POSTGRES_VERSION
+# POSTGRES_DB
+# POSTGRES_USER
+# POSTGRES_PASS
+
+name: scenegendeploybench
+
+networks:
+  scenegendeploybench:
+
+services:
+  orchestrator:
+    build:
+      context: ./orchestrator
+    image: ghcr.io/cashewhero/scenegendeploybench-orchestrator:${ORCHESTRATOR_VERSION:-latest}
+    user: "${UID:-0}:${GID:-0}"
+    group_add:
+      - "${DOCKER_GID:-${GID:-0}}"
+    networks:
+      - scenegendeploybench
+    environment:
+      UID: ${UID:-}
+      GID: ${GID:-}
+      PG_DB_HOST: postgres
+      PG_DB_PORT: "5432"
+      PG_DB_NAME: ${POSTGRES_DB}
+      PG_DB_USER: ${POSTGRES_USER}
+      PG_DB_PASSWORD: ${POSTGRES_PASS}
+      ORCHESTRATOR_PORT: ${ORCHESTRATOR_PORT:-58080}
+      PATH_CONFIG_SYSTEM: /app/config/system.yaml
+    ports:
+      - "${ORCHESTRATOR_PORT:-58080}:${ORCHESTRATOR_PORT:-58080}"
+    volumes:
+      - ${PATH_OUTPUT}:/data/output
+      - ${PATH_PIPELINES}:/data/pipelines
+      - ${PATH_DATASETS}:/data/datasets:ro
+      - ${PATH_MODEL_CACHE}:/data/model_cache
+      - ${PATH_CONFIG}:/app/config:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  postgres:
+    image: postgres:${POSTGRES_VERSION:-17}
+    user: "${UID:-0}:${GID:-0}"
+    networks:
+      - scenegendeploybench
+    volumes:
+      - ${PATH_POSTGRES_DATA}:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASS}
+    restart: unless-stopped

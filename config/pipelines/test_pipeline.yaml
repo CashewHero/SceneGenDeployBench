@@ -1,0 +1,39 @@
+pipeline_version: 1
+name: test_pipeline
+dataset: example_set1/city
+
+stages:
+  copy:
+    runner: test_runner
+    inputs:
+      data: ${{ dataset }}
+
+  evaluate:
+    needs: copy
+    runner: test_evaluator
+    inputs:
+      data: ${{ dataset }}
+      candidate: ${{ stages.copy.outputs }}
+
+  print_results:
+    needs: evaluate
+    scope: pipeline
+    image: python:3.12-slim
+    run:
+      - python
+      - -c
+      - |
+        import json
+
+        context = json.load(open("/workspace/pipeline.json", encoding="utf-8"))
+        for execution in context["needs"]["evaluate"]:
+            metrics = execution["result"].get("metrics", [])
+            scores = [
+                f"{metric['name']}={metric.get('value')}"
+                for metric in metrics
+                if metric.get("source") == "evaluator"
+            ]
+            print(
+                f"{execution['external_key']}: "
+                f"{', '.join(scores) or 'no evaluator metrics'}"
+            )

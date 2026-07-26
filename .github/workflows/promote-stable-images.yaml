@@ -1,0 +1,76 @@
+name: Promote Stable Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Existing release tag to promote, without the leading v, for example 1.1.1
+        required: true
+        type: string
+      major:
+        description: Major tag to move, for example 1
+        required: true
+        default: "1"
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: promote-stable-images-${{ inputs.major }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  promote:
+    name: Promote ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - scenegendeploybench-orchestrator
+          - scenegendeploybench-testrunner
+
+    steps:
+      - name: Set lowercase image namespace
+        id: namespace
+        run: echo "value=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate inputs
+        env:
+          VERSION: ${{ inputs.version }}
+          MAJOR: ${{ inputs.major }}
+        run: |
+          if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "version must look like 1.1.1, without a leading v" >&2
+            exit 1
+          fi
+          if [[ ! "${MAJOR}" =~ ^[0-9]+$ ]]; then
+            echo "major must look like 1" >&2
+            exit 1
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Promote existing image
+        env:
+          VERSION: ${{ inputs.version }}
+          MAJOR: ${{ inputs.major }}
+        run: |
+          image="${{ env.REGISTRY }}/${{ steps.namespace.outputs.value }}/${{ matrix.image }}"
+          docker buildx imagetools create \
+            -t "${image}:${MAJOR}" \
+            -t "${image}:latest" \
+            "${image}:${VERSION}"

@@ -1,0 +1,36 @@
+config_version: 1
+
+storage:
+  dataset_root: /data/datasets
+  model_cache_root: /data/model_cache
+  output_root: /data/output
+  pipeline_root: /data/pipelines
+
+catalogs:
+  runners: runners
+  pipelines: pipelines
+
+orchestrator:
+  runner_env:
+    HF_HOME: /data/model_cache/huggingface
+    # HF_TOKEN: ${HF_TOKEN}
+  polling:
+    startup_seconds: 5.0
+    post_submit_seconds: 5.0
+    running_seconds: 20.0
+  scheduling:
+    max_batch_size: 50
+    max_attempts: 3
+    job_timeout_minutes: 60
+    startup_timeout_minutes: 5
+    timezone: Asia/Tokyo
+    allowed_windows:
+      - start: "23:00"
+        end: "06:00"
+        start_policy: open
+        end_policy: finish_job
+      - days: [sat, sun]
+        start: "00:00"
+        end: "24:00"
+        start_policy: open
+        end_policy: finish_job

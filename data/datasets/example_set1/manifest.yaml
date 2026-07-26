@@ -1,0 +1,13 @@
+dataset_name: "example_set1"
+dataset_version: "0.1.0"
+data_types:
+  - "image"
+metadata:
+  projection: "equirectangular"
+  resolution: [1024, 512]
+  fov: [360, 180]
+tags: ["panorama", "example"]
+
+subsets:
+  city: "city/manifest.yaml"
+  nature: "nature/manifest.yaml"

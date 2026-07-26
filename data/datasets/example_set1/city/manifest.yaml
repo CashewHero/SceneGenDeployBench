@@ -1,0 +1,25 @@
+tags: ["city"]
+
+samples:
+  000:
+    image: 1dd2ca.jpg
+  001:
+    image: 3d46c7.jpg
+  002:
+    image: 570efd.jpg
+  003:
+    image: 904ec4.jpg
+    tags: ["night"]
+  004:
+    image: 9b21a5.jpg
+  005:
+    image: c75baa.jpg
+    tags: ["snow", "night"]
+  006:
+    image: e05118.jpg
+  007:
+    image: ed57d9.jpg
+  008:
+    image: f2aad8.jpg
+  009:
+    image: fe1475.jpg

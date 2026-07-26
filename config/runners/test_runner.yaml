@@ -1,0 +1,85 @@
+catalog_version: 1
+
+runners:
+  - runner: test_runner
+    version: 0.1.0
+    latest: true
+    display_name: Test Runner
+    kind: generator
+    contract_version: 1
+    inputs:
+      data:
+        required_sample:
+          required_datatype:
+            - image
+          optional_datatype:
+            - depth
+            - camera_pose
+    scheduling:
+      max_batch_size: 50
+      max_attempts: 3
+      job_timeout_minutes: 30
+      startup_timeout_minutes: 2
+      allowed_windows:
+      - start: "00:00"
+        end: "24:00"
+        start_policy: open
+        end_policy: finish_job
+    launcher:
+      driver: docker
+      compat_version: 1
+      image: ghcr.io/cashewhero/scenegendeploybench-testrunner:latest
+      endpoint:
+        port: 58090
+      env:
+        TEST_RUNNER_MIN_SECONDS: "360"
+        TEST_RUNNER_MAX_SECONDS: "720"
+  - runner: test_evaluator
+    version: 0.1.0
+    latest: true
+    display_name: Test Evaluator
+    kind: evaluator
+    contract_version: 1
+    inputs:
+      data:
+        required_sample:
+          required_datatype:
+            - image
+          optional_datatype:
+            - depth
+            - camera_pose
+      candidate:
+        required_sample:
+          required_datatype:
+            - image
+          optional_datatype:
+            - depth
+            - scene
+            - mesh
+      references:
+        optional_sample:
+          required_datatype:
+            - image
+          optional_datatype:
+            - depth
+            - camera_pose
+    scheduling:
+      max_batch_size: 50
+      max_attempts: 3
+      job_timeout_minutes: 30
+      startup_timeout_minutes: 2
+      allowed_windows:
+      - start: "00:00"
+        end: "24:00"
+        start_policy: open
+        end_policy: finish_job
+    launcher:
+      driver: docker
+      compat_version: 1
+      image: ghcr.io/cashewhero/scenegendeploybench-testrunner:latest
+      endpoint:
+        port: 58090
+      env:
+        TEST_RUNNER_MIN_SECONDS: "30"
+        TEST_RUNNER_MAX_SECONDS: "60"
+        TEST_RUNNER_MODE: evaluator

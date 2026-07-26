@@ -1,0 +1,26 @@
+tags: ["nature"]
+
+samples:
+  000:
+    image: 13a01f.jpg
+    tags: ["stream"]
+  001:
+    image: 532f0d.jpg
+  002:
+    image: 5dec14.jpg
+  003:
+    image: 605093.jpg
+  004:
+    image: 7cf86a.jpg
+  005:
+    image: 8c0f25.jpg
+  006:
+    image: aefed6.jpg
+    tags: ["mountain"]
+  007:
+    image: cf4d9a.jpg
+    tags: ["snow"]
+  008:
+    image: fc0214.jpg
+  009:
+    image: fc5296.jpg
