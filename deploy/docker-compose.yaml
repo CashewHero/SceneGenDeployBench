@@ -48,6 +48,7 @@ services:
       - ${PATH_MODEL_CACHE}:/data/model_cache
       - ${PATH_CONFIG}:/app/config:ro
       - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
 
   postgres:
     image: postgres:${POSTGRES_VERSION:-17}

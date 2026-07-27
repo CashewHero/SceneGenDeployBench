@@ -9,8 +9,8 @@ COMPOSE_FILE="${DEPLOY_DIR}/docker-compose.yaml"
 DEPLOY_ENV_FILE="${DEPLOY_DIR}/.env"
 
 LOCALTEST_PROJECT="scenegendeploybench-localtest"
-ORCHESTRATOR_IMAGE_REPO="scenegendeploybench-orchestrator"
-RUNNER_IMAGE="scenegendeploybench-testrunner:local"
+ORCHESTRATOR_IMAGE="ghcr.io/cashewhero/scenegendeploybench-orchestrator:local"
+RUNNER_IMAGE="ghcr.io/cashewhero/scenegendeploybench-testrunner:local"
 
 WAIT_MAX_ATTEMPTS=60
 DEFAULT_ORCHESTRATOR_PORT=58080
@@ -67,6 +67,22 @@ compose() {
     --env-file "${DEPLOY_ENV_FILE}" \
     -f "${COMPOSE_FILE}" \
     "$@"
+}
+
+warn_if_orchestrator_image_mismatch() {
+  local configured_images
+
+  if ! configured_images="$(compose config --images 2>/dev/null)"; then
+    echo "warning: cannot verify which orchestrator image Compose will use; local image ${ORCHESTRATOR_IMAGE} may not be used" >&2
+    return
+  fi
+  if grep -Fxq "${ORCHESTRATOR_IMAGE}" <<<"${configured_images}"; then
+    return
+  fi
+
+  echo "warning: localtest builds ${ORCHESTRATOR_IMAGE}, but Compose is configured for different images:" >&2
+  echo "${configured_images}" >&2
+  echo "warning: the locally built orchestrator image will not be used; set ORCHESTRATOR_VERSION=local in ${DEPLOY_ENV_FILE}" >&2
 }
 
 local_env_path() {
@@ -180,12 +196,10 @@ run_tests() {
 }
 
 build_images() {
-  local orchestrator_version
-
+  warn_if_orchestrator_image_mismatch
   run_tests
-  orchestrator_version="$(compose_env_value ORCHESTRATOR_VERSION)"
   docker build \
-    -t "${ORCHESTRATOR_IMAGE_REPO}:${orchestrator_version}" \
+    -t "${ORCHESTRATOR_IMAGE}" \
     "${REPO_ROOT}/orchestrator"
   docker build \
     -t "${RUNNER_IMAGE}" \
@@ -233,6 +247,7 @@ log() {
 
 up() {
   ensure_localtest_env
+  warn_if_orchestrator_image_mismatch
   compose up -d postgres orchestrator
   wait_for_postgres
   wait_for_orchestrator
