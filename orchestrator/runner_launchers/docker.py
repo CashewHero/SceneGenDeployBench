@@ -549,7 +549,8 @@ class DockerRunnerLauncher:
         raw_gpus = self.context.runner.launcher.get("gpus")
         if raw_gpus is None:
             return []
-        gpus = str(raw_gpus).strip().lower()
+        gpus_raw = str(raw_gpus).strip()
+        gpus = gpus_raw.lower()
         if not gpus or gpus in {"none", "0", "false", "no", "off"}:
             return []
         request: dict[str, Any] = {
@@ -558,12 +559,26 @@ class DockerRunnerLauncher:
         }
         if gpus == "all":
             request["Count"] = -1
+        elif gpus.startswith("device="):
+            device_ids = [
+                device_id.strip()
+                for device_id in gpus_raw.split("=", 1)[1].split(",")
+                if device_id.strip()
+            ]
+            if not device_ids:
+                raise ValueError(
+                    f"runner {self.context.runner.selector} launcher.gpus "
+                    "device selection requires at least one device ID"
+                )
+            request["DeviceIDs"] = device_ids
         else:
             try:
                 request["Count"] = int(gpus)
             except ValueError as exc:
                 raise ValueError(
-                    f"runner {self.context.runner.selector} launcher.gpus must be 'all', 'none', or an integer"
+                    f"runner {self.context.runner.selector} launcher.gpus must be "
+                    "'all', 'none', an integer, or "
+                    "'device=<id>[,<id>...]'"
                 ) from exc
             if request["Count"] <= 0:
                 return []

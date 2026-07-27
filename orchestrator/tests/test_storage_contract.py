@@ -231,6 +231,36 @@ class StorageContractTests(unittest.TestCase):
             call("DELETE", "/containers/probe-1?force=1"),
         )
 
+    def test_docker_gpu_device_selection_uses_device_ids(self) -> None:
+        config = load_config(str(self.config_path))
+        runner = config.runners["test_runner@0.1.0"]
+        runner = replace(
+            runner,
+            launcher={
+                **runner.launcher,
+                "gpus": (
+                    "device=GPU-748e4f90-0154-4547-2102-ddaa87955eb8"
+                ),
+            },
+        )
+
+        requests = DockerRunnerLauncher(
+            RunnerLaunchContext(runner=runner)
+        )._device_requests()
+
+        self.assertEqual(
+            requests,
+            [
+                {
+                    "Driver": "nvidia",
+                    "Capabilities": [["gpu"]],
+                    "DeviceIDs": [
+                        "GPU-748e4f90-0154-4547-2102-ddaa87955eb8"
+                    ],
+                }
+            ],
+        )
+
     def test_docker_gpu_preflight_reports_start_failure_and_cleans_up(
         self,
     ) -> None:
