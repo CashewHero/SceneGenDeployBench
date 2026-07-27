@@ -4,9 +4,10 @@ import os
 import tempfile
 import unittest
 from contextlib import nullcontext
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from app.config import load_config
 from main import build_parser
@@ -163,6 +164,129 @@ class StorageContractTests(unittest.TestCase):
             pull_image.assert_called_once_with("example:0.1.0")
         self.assertIn("pulling it now", logs.output[0])
         self.assertIn("pull completed", logs.output[1])
+
+    def test_docker_preflight_skips_probe_without_gpu_request(self) -> None:
+        config = load_config(str(self.config_path))
+        runner = config.runners["test_runner@0.1.0"]
+        client = Mock()
+        with (
+            patch("runner_launchers.docker.os.path.exists", return_value=True),
+            patch(
+                "runner_launchers.docker._DockerEngineClient",
+                return_value=client,
+            ),
+        ):
+            result = DockerRunnerLauncher(
+                RunnerLaunchContext(runner=runner)
+            ).preflight()
+
+        self.assertTrue(result.available)
+        client.ping.assert_called_once_with()
+        client.ensure_image.assert_not_called()
+        client.request.assert_not_called()
+
+    def test_docker_gpu_preflight_starts_and_removes_probe(self) -> None:
+        config = load_config(str(self.config_path))
+        runner = config.runners["test_runner@0.1.0"]
+        runner = replace(
+            runner,
+            launcher={**runner.launcher, "gpus": "all"},
+        )
+        client = Mock()
+        client.request.side_effect = [{"Id": "probe-1"}, None, None]
+        with (
+            patch("runner_launchers.docker.os.path.exists", return_value=True),
+            patch(
+                "runner_launchers.docker._DockerEngineClient",
+                return_value=client,
+            ),
+        ):
+            result = DockerRunnerLauncher(
+                RunnerLaunchContext(runner=runner)
+            ).preflight()
+
+        self.assertTrue(result.available)
+        client.ensure_image.assert_called_once_with("test-runner:local")
+        create_request, start_request, delete_request = (
+            client.request.call_args_list
+        )
+        self.assertEqual(create_request.args[0], "POST")
+        self.assertIn("/containers/create?name=", create_request.args[1])
+        self.assertEqual(
+            create_request.args[2]["HostConfig"]["DeviceRequests"],
+            [
+                {
+                    "Driver": "nvidia",
+                    "Capabilities": [["gpu"]],
+                    "Count": -1,
+                }
+            ],
+        )
+        self.assertEqual(
+            start_request,
+            call("POST", "/containers/probe-1/start"),
+        )
+        self.assertEqual(
+            delete_request,
+            call("DELETE", "/containers/probe-1?force=1"),
+        )
+
+    def test_docker_gpu_preflight_reports_start_failure_and_cleans_up(
+        self,
+    ) -> None:
+        config = load_config(str(self.config_path))
+        runner = config.runners["test_runner@0.1.0"]
+        runner = replace(
+            runner,
+            launcher={**runner.launcher, "gpus": "all"},
+        )
+        client = Mock()
+        client.request.side_effect = [
+            {"Id": "probe-1"},
+            RuntimeError("nvidia runtime failed"),
+            None,
+        ]
+        with (
+            patch("runner_launchers.docker.os.path.exists", return_value=True),
+            patch(
+                "runner_launchers.docker._DockerEngineClient",
+                return_value=client,
+            ),
+        ):
+            result = DockerRunnerLauncher(
+                RunnerLaunchContext(runner=runner)
+            ).preflight()
+
+        self.assertFalse(result.available)
+        self.assertEqual(result.code, "LAUNCHER_PREFLIGHT_FAILED")
+        self.assertIn("nvidia runtime failed", result.message or "")
+        self.assertEqual(
+            client.request.call_args_list[-1],
+            call("DELETE", "/containers/probe-1?force=1"),
+        )
+
+    def test_claim_candidates_exclude_unavailable_runners(self) -> None:
+        config = load_config(str(self.config_path))
+        cursor = Mock()
+        cursor.fetchall.return_value = []
+        connection = Mock()
+        connection.cursor.return_value = nullcontext(cursor)
+        with patch.object(
+            db_storage,
+            "connect_database",
+            return_value=nullcontext(connection),
+        ):
+            db_storage._claim_candidate_rows(
+                config,
+                excluded_runner_selectors={"test_runner@0.1.0"},
+            )
+
+        query, params = cursor.execute.call_args.args
+        self.assertIn(
+            "AND NOT (runner_selector = ANY(%s))",
+            query,
+        )
+        self.assertEqual(params[0], ["test_runner@0.1.0"])
 
     def test_database_connection_error_is_actionable(self) -> None:
         config = load_config(str(self.config_path))

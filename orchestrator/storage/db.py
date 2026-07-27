@@ -2203,13 +2203,18 @@ def _resolve_target_batch(
     return generated_identifier("batch"), None, False, ""
 
 
-def _claim_candidate_rows(config: OrchestratorConfig) -> list[dict[str, Any]]:
+def _claim_candidate_rows(
+    config: OrchestratorConfig,
+    *,
+    excluded_runner_selectors: set[str] | None = None,
+) -> list[dict[str, Any]]:
     known_runner_selectors = sorted(config.runners)
     active_runner_selectors = sorted(
         runner.selector
         for runner in config.runners.values()
         if evaluate_window_state(runner.scheduling or config.orchestrator.scheduling or {}).active
     )
+    excluded = sorted(excluded_runner_selectors or ())
     with connect_database(config) as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
@@ -2217,6 +2222,7 @@ def _claim_candidate_rows(config: OrchestratorConfig) -> list[dict[str, Any]]:
                 SELECT *
                 FROM jobs
                 WHERE status = 'pending'
+                  AND NOT (runner_selector = ANY(%s))
                   AND (
                     runner_selector = ANY(%s)
                     OR (runner_selector = ANY(%s) AND allow_start_outside_window = TRUE)
@@ -2226,6 +2232,7 @@ def _claim_candidate_rows(config: OrchestratorConfig) -> list[dict[str, Any]]:
                 LIMIT %s
                 """,
                 (
+                    excluded,
                     active_runner_selectors,
                     known_runner_selectors,
                     known_runner_selectors,
@@ -2235,9 +2242,53 @@ def _claim_candidate_rows(config: OrchestratorConfig) -> list[dict[str, Any]]:
             return list(cur.fetchall())
 
 
-def claim_pending_batch(config: OrchestratorConfig) -> dict[str, Any] | None:
+def claimable_pending_runner_selectors(
+    config: OrchestratorConfig,
+) -> list[str]:
+    known_runner_selectors = sorted(config.runners)
+    active_runner_selectors = sorted(
+        runner.selector
+        for runner in config.runners.values()
+        if evaluate_window_state(
+            runner.scheduling or config.orchestrator.scheduling or {}
+        ).active
+    )
+    with connect_database(config) as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT runner_selector
+                FROM jobs
+                WHERE status = 'pending'
+                  AND (
+                    runner_selector = ANY(%s)
+                    OR (runner_selector = ANY(%s) AND allow_start_outside_window = TRUE)
+                    OR NOT (runner_selector = ANY(%s))
+                  )
+                ORDER BY runner_selector
+                """,
+                (
+                    active_runner_selectors,
+                    known_runner_selectors,
+                    known_runner_selectors,
+                ),
+            )
+            return [
+                str(row["runner_selector"])
+                for row in cur.fetchall()
+            ]
+
+
+def claim_pending_batch(
+    config: OrchestratorConfig,
+    *,
+    excluded_runner_selectors: set[str] | None = None,
+) -> dict[str, Any] | None:
     now = utc_now_timestamp()
-    candidates = _claim_candidate_rows(config)
+    candidates = _claim_candidate_rows(
+        config,
+        excluded_runner_selectors=excluded_runner_selectors,
+    )
 
     for first in candidates:
         runner = config.runners.get(first["runner_selector"])

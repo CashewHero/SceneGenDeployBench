@@ -19,6 +19,7 @@ from cli.commands import (
 )
 from storage.db import (
     DatabaseUnavailableError,
+    claimable_pending_runner_selectors,
     claim_pending_batch,
     ensure_schema,
     sync_runner_state,
@@ -28,6 +29,8 @@ from execution.dispatch import dispatch_batch
 from execution.pipelines import reconcile_pipelines
 from execution.script_run import remove_script_containers
 from domain.scheduling import WindowState, evaluate_window_state
+from runner_launchers import create_runner_launcher
+from runner_launchers.base import LauncherPreflightResult, RunnerLaunchContext
 
 logger = logging.getLogger("scenegendeploybench.orchestrator.service")
 STARTUP_DB_MAX_ATTEMPTS = 60
@@ -204,8 +207,42 @@ def _materialize_claimed_batch(claim: dict[str, Any]) -> BatchPlan:
     )
 
 
+def _runner_launch_context(config, runner) -> RunnerLaunchContext:
+    return RunnerLaunchContext(
+        runner=runner,
+        dataset_root=str(config.storage.dataset_root),
+        model_cache_root=str(config.storage.model_cache_root),
+        output_root=str(config.storage.output_root),
+        pipeline_root=str(config.storage.pipeline_root),
+        runner_env=config.orchestrator.runner_env,
+    )
+
+
+def _preflight_pending_runners(
+    config,
+) -> dict[str, LauncherPreflightResult]:
+    results: dict[str, LauncherPreflightResult] = {}
+    for selector in claimable_pending_runner_selectors(config):
+        runner = config.runners.get(selector)
+        if runner is None:
+            continue
+        try:
+            launcher = create_runner_launcher(
+                _runner_launch_context(config, runner)
+            )
+            results[selector] = launcher.preflight()
+        except Exception as exc:
+            results[selector] = LauncherPreflightResult(
+                available=False,
+                code="LAUNCHER_PREFLIGHT_FAILED",
+                message=str(exc),
+            )
+    return results
+
+
 def scheduler_loop(server: "OrchestratorHTTPServer") -> None:
     busy_sleep_seconds = 1
+    previously_blocked: dict[str, LauncherPreflightResult] = {}
     while True:
         sleep_seconds: int | None = None
         with server.orchestrator.lock:
@@ -226,8 +263,39 @@ def scheduler_loop(server: "OrchestratorHTTPServer") -> None:
             pipeline_result = reconcile_pipelines(config)
             if pipeline_result["pipeline_count"]:
                 logger.info(event_message("pipelines_polled", **pipeline_result))
+            preflight_results = _preflight_pending_runners(config)
+            blocked = {
+                selector: result
+                for selector, result in preflight_results.items()
+                if not result.available
+            }
+            for selector, result in blocked.items():
+                if selector in previously_blocked:
+                    continue
+                logger.warning(
+                    event_message(
+                        "runner_dispatch_paused",
+                        runner_selector=selector,
+                        code=result.code,
+                        error=result.message,
+                    )
+                )
+            for selector in previously_blocked.keys() - blocked.keys():
+                result = preflight_results.get(selector)
+                if result is None or not result.available:
+                    continue
+                logger.info(
+                    event_message(
+                        "runner_dispatch_resumed",
+                        runner_selector=selector,
+                    )
+                )
+            previously_blocked = blocked
             server.orchestrator.set_operation("scheduler-claim")
-            claim = claim_pending_batch(config)
+            claim = claim_pending_batch(
+                config,
+                excluded_runner_selectors=set(blocked),
+            )
             if claim is None:
                 server.orchestrator.finish_operation(
                     result={

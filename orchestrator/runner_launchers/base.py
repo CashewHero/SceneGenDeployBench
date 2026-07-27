@@ -6,8 +6,17 @@ from typing import Protocol
 from app.config import RunnerDefinition
 
 
+@dataclass(frozen=True)
+class LauncherPreflightResult:
+    available: bool
+    code: str | None = None
+    message: str | None = None
+
+
 class RunnerLauncher(Protocol):
     def validate(self) -> None: ...
+
+    def preflight(self) -> LauncherPreflightResult: ...
 
     def start_runner(self) -> None: ...
 

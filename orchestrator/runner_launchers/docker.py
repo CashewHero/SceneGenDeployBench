@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import quote
 
-from .base import RunnerLaunchContext
+from .base import LauncherPreflightResult, RunnerLaunchContext
 
 
 logger = logging.getLogger("scenegendeploybench.docker")
@@ -303,6 +303,72 @@ class DockerRunnerLauncher:
 
         self._container_id = container_id
         self._endpoint = f"http://{container_name}:{self._endpoint_port()}"
+
+    def preflight(self) -> LauncherPreflightResult:
+        try:
+            self.validate()
+            client = _DockerEngineClient(socket_path=self._socket_path())
+            client.ping()
+            device_requests = self._device_requests()
+            if not device_requests:
+                return LauncherPreflightResult(available=True)
+
+            image = str(self.context.runner.launcher.get("image")).strip()
+            client.ensure_image(image)
+            container_name = (
+                f"scenegendeploybench-preflight-"
+                f"{uuid.uuid4().hex[:12]}"
+            )
+            container_id: str | None = None
+            try:
+                created = client.request(
+                    "POST",
+                    f"/containers/create?name={quote(container_name, safe='')}",
+                    {
+                        "Image": image,
+                        "Entrypoint": ["/bin/true"],
+                        "Labels": {
+                            "scenegendeploybench.managed": "true",
+                            "scenegendeploybench.preflight": "true",
+                            "scenegendeploybench.runner_selector": (
+                                self.context.runner.selector
+                            ),
+                        },
+                        "HostConfig": {
+                            "DeviceRequests": device_requests,
+                        },
+                    },
+                )
+                if not isinstance(created, dict) or not created.get("Id"):
+                    raise RuntimeError(
+                        "Docker API returned an invalid GPU preflight "
+                        f"create response: {created!r}"
+                    )
+                container_id = str(created["Id"])
+                client.request(
+                    "POST",
+                    f"/containers/{quote(container_id, safe='')}/start",
+                )
+            finally:
+                if container_id is not None:
+                    try:
+                        client.request(
+                            "DELETE",
+                            f"/containers/{quote(container_id, safe='')}?force=1",
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "failed to remove GPU preflight container %s: %s",
+                            container_id,
+                            exc,
+                        )
+            return LauncherPreflightResult(available=True)
+        except Exception as exc:
+            return LauncherPreflightResult(
+                available=False,
+                code="LAUNCHER_PREFLIGHT_FAILED",
+                message=str(exc),
+            )
 
     def get_endpoint(self) -> str:
         self.start_runner()

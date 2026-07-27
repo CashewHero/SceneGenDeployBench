@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .base import RunnerLaunchContext
+from .base import LauncherPreflightResult, RunnerLaunchContext
 
 
 @dataclass(frozen=True)
@@ -22,6 +22,19 @@ class StaticHttpRunnerLauncher:
             raise RuntimeError(
                 "static_http launcher requires an endpoint override or launcher.endpoint.base_url in the selected runner config"
             )
+
+    def preflight(self) -> LauncherPreflightResult:
+        self.validate()
+        if not self._base_url():
+            return LauncherPreflightResult(
+                available=False,
+                code="ENDPOINT_MISSING",
+                message=(
+                    "static_http launcher requires an endpoint override or "
+                    "launcher.endpoint.base_url"
+                ),
+            )
+        return LauncherPreflightResult(available=True)
 
     def get_endpoint(self) -> str:
         self.start_runner()
