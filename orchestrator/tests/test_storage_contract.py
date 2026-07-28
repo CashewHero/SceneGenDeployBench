@@ -509,6 +509,35 @@ class StorageContractTests(unittest.TestCase):
             "done\n",
         )
 
+    def test_script_workspace_keeps_contents_when_metadata_is_unsupported(
+        self,
+    ) -> None:
+        root = Path(self.temp_dir.name)
+        workspace = root / "workspace-metadata-unsupported"
+        pipeline_root = root / "pipelines-metadata-unsupported"
+        workspace.mkdir()
+        (workspace / "report.txt").write_text("done\n", encoding="utf-8")
+
+        with patch(
+            "execution.script_run.shutil.copystat",
+            side_effect=PermissionError("metadata denied"),
+        ):
+            result = _publish_script_workspace(
+                workspace=workspace,
+                initial_files=set(),
+                pipeline_root=pipeline_root,
+                publish_dir=Path("example/run"),
+                retention="keep",
+            )
+
+        self.assertEqual(result, {})
+        self.assertEqual(
+            (pipeline_root / "example/run/report.txt").read_text(
+                encoding="utf-8"
+            ),
+            "done\n",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

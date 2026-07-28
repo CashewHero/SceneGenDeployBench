@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import struct
@@ -30,6 +31,7 @@ ACCESS_NAMES = {
     "model-cache",
     "database",
 }
+logger = logging.getLogger("scenegendeploybench.orchestrator.script_run")
 
 
 @dataclass(frozen=True)
@@ -257,6 +259,19 @@ def _rewrite_script_output_paths(
     return result
 
 
+def _publish_script_file(source: Path, destination: Path) -> None:
+    shutil.copyfile(source, destination)
+    try:
+        shutil.copystat(source, destination)
+    except OSError as exc:
+        logger.warning(
+            "could not preserve script output metadata for %s: %s; "
+            "keeping copied contents",
+            destination,
+            exc,
+        )
+
+
 def _publish_script_workspace(
     *,
     workspace: Path,
@@ -289,7 +304,7 @@ def _publish_script_workspace(
         source = workspace / relative
         destination = destination_root / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
+        _publish_script_file(source, destination)
         published[relative.as_posix()] = str(destination)
     return _rewrite_script_output_paths(result, published)
 
