@@ -10,6 +10,7 @@ from app.config import OrchestratorConfig, RunnerDefinition
 from storage.db import (
     fetch_job_status,
     release_batch_pending_jobs,
+    sync_dataset_state,
     write_job_dispatch_failure,
     write_job_terminal_result,
 )
@@ -34,7 +35,7 @@ def _record_terminal_job(
     terminal: dict[str, Any],
 ) -> dict[str, Any]:
     result = terminal.get("result") or {}
-    return write_job_terminal_result(
+    terminal_write = write_job_terminal_result(
         config=config,
         job_id=job.job_id,
         batch_id=batch_id,
@@ -44,6 +45,39 @@ def _record_terminal_job(
         result_payload=result if isinstance(result, dict) else {},
         artifacts_payload=list(result.get("artifacts", [])) if isinstance(result.get("artifacts"), list) else [],
     )
+    job_payload = dict(job.request_payload.get("job") or {})
+    if (
+        terminal_write.get("status") == "completed"
+        and job_payload.get("job_type") == "dataset_download"
+        and job_payload.get("rescan_after_download", True) is not False
+    ):
+        dataset_name = str(
+            dict(job_payload.get("parameters") or {}).get("dataset_name") or ""
+        ).strip()
+        if dataset_name:
+            try:
+                rescan_result = sync_dataset_state(
+                    config,
+                    dataset_name=dataset_name,
+                )
+                logger.info(
+                    _event_message(
+                        "dataset_rescanned_after_download",
+                        job_id=job.job_id,
+                        dataset=dataset_name,
+                        rescan=rescan_result,
+                    )
+                )
+            except Exception as exc:
+                logger.warning(
+                    _event_message(
+                        "dataset_rescan_after_download_failed",
+                        job_id=job.job_id,
+                        dataset=dataset_name,
+                        error=str(exc),
+                    )
+                )
+    return terminal_write
 
 
 def _release_pending_jobs_for_batch(config: OrchestratorConfig, batch_id: str, policy: str) -> dict[str, Any]:

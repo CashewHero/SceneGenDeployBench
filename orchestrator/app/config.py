@@ -104,6 +104,7 @@ class RunnerDefinition:
     kind: str
     contract_version: int
     inputs: dict[str, dict[str, dict[str, list[str]]]]
+    rescan_after_download: bool = True
     job_parameters: dict[str, Any] = field(default_factory=dict)
     scheduling: dict[str, Any] = field(default_factory=dict)
     launcher: dict[str, Any] = field(default_factory=dict)
@@ -492,6 +493,10 @@ def _load_runner_definitions(
                     f"{catalog_path}.runners[{index}].contract_version must be "
                     f"{SUPPORTED_CONTRACT_VERSION}"
                 )
+            rescan_after_download = _normalize_bool(
+                entry.get("rescan_after_download", True),
+                f"{catalog_path}.runners[{index}].rescan_after_download",
+            )
             effective_scheduling = (
                 _deep_merge(scheduling_defaults, scheduling)
                 if scheduling_defaults or scheduling
@@ -510,6 +515,7 @@ def _load_runner_definitions(
                 kind=kind,
                 contract_version=contract_version,
                 inputs=inputs,
+                rescan_after_download=rescan_after_download,
                 job_parameters=job_parameters,
                 scheduling=effective_scheduling,
                 launcher=launcher,

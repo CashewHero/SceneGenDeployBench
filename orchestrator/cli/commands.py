@@ -1111,6 +1111,7 @@ def download_dataset(
     settings: list[str] | None,
     timeout_minutes: float | None,
     allow_start_outside_window: bool,
+    rescan_after_download: bool | None = None,
 ) -> dict[str, Any]:
     config = load_runtime_config(config_path)
     resolved_runner = _resolve_dataset_downloader(config, runner=runner)
@@ -1122,6 +1123,7 @@ def download_dataset(
         runner=resolved_runner,
         parameters=parameters,
         timeout_seconds=effective_timeout_seconds,
+        rescan_after_download=rescan_after_download,
         allow_start_outside_window=allow_start_outside_window,
     )
     created_ids = [str(row.get("job_ref") or row.get("job_id") or "") for row in payload.get("jobs", [])]

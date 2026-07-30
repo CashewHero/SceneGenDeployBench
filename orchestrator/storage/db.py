@@ -1401,6 +1401,7 @@ def insert_resolved_job_row(
     source_job_id: str | None,
     allow_start_outside_window: bool,
     now: str,
+    rescan_after_download: bool | None = None,
     pipeline_run_id: str | None = None,
     pipeline_stage_execution_id: str | None = None,
 ) -> dict[str, Any]:
@@ -1420,6 +1421,12 @@ def insert_resolved_job_row(
         "timeout_seconds": timeout_seconds,
         "parameters": dict(parameters),
     }
+    if job_type == "dataset_download":
+        job_payload["rescan_after_download"] = (
+            runner.rescan_after_download
+            if rescan_after_download is None
+            else bool(rescan_after_download)
+        )
     if primary_sample:
         job_payload["primary_sample"] = primary_sample
     if metadata:
@@ -1747,6 +1754,7 @@ def insert_dataset_download_job(
     parameters: dict[str, Any],
     timeout_seconds: int,
     allow_start_outside_window: bool,
+    rescan_after_download: bool | None = None,
 ) -> dict[str, Any]:
     sync_runner_state(config)
     normalized_dataset_name = dataset_name.strip().strip("/")
@@ -1771,7 +1779,7 @@ def insert_dataset_download_job(
     }
     with connect_database(config) as conn:
         with conn.cursor() as cur:
-            insert_resolved_job_row(
+            request_payload = insert_resolved_job_row(
                 cur,
                 job_id=job_id,
                 runner=runner,
@@ -1783,6 +1791,7 @@ def insert_dataset_download_job(
                 source_job_id=None,
                 allow_start_outside_window=allow_start_outside_window,
                 now=now,
+                rescan_after_download=rescan_after_download,
             )
     return {
         "job_count": 1,
@@ -1792,6 +1801,7 @@ def insert_dataset_download_job(
         "runner": runner.selector,
         "job_type": "dataset_download",
         "timeout_seconds": timeout_seconds,
+        "rescan_after_download": request_payload["job"]["rescan_after_download"],
         "allow_start_outside_window": allow_start_outside_window,
         "parameters": dict(parameters),
         "jobs": [

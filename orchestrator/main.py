@@ -54,6 +54,15 @@ from app.service import run_service
 DEFAULT_ORCHESTRATOR_PORT = 58080
 
 
+def parse_boolean(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    raise argparse.ArgumentTypeError("expected true or false")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="deploybench")
     parser.add_argument("--config", help="path to system YAML config")
@@ -218,6 +227,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="pass a downloader parameter; repeat for multiple values",
     )
     dataset_download.add_argument("--timeout-minutes", type=float, help="override job timeout in minutes")
+    dataset_download.add_argument(
+        "--rescan",
+        type=parse_boolean,
+        metavar="{true,false}",
+        default=None,
+        help="override whether to rescan after download; omit to use the runner setting",
+    )
     dataset_download.add_argument(
         "--allow-outside-window",
         action="store_true",
@@ -555,6 +571,7 @@ def handle_dataset_download(args: argparse.Namespace) -> int:
         runner=args.runner,
         settings=args.settings,
         timeout_minutes=args.timeout_minutes,
+        rescan_after_download=args.rescan,
         allow_start_outside_window=args.allow_outside_window,
     )
     if output_format(args, "text") == "json":
@@ -567,6 +584,7 @@ def handle_dataset_download(args: argparse.Namespace) -> int:
         ("Runner", payload["runner"]),
         ("Job Type", payload["job_type"]),
         ("Timeout Minutes", round(payload["timeout_seconds"] / 60, 3)),
+        ("Rescan After Download", "yes" if payload["rescan_after_download"] else "no"),
         ("Allow Outside Window", "yes" if payload["allow_start_outside_window"] else "no"),
     ]))
     if payload["parameters"]:

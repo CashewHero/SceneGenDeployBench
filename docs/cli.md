@@ -93,12 +93,13 @@ deploybench dataset list
 deploybench dataset list testset1/subset
 deploybench dataset show testset1 --sample
 deploybench dataset download tartanair-pano --runner tartanair --set mode=pano --set modality=image --set env=AbandonedFactory2
+deploybench dataset download tartanair-pano --runner tartanair --rescan false
 deploybench dataset rescan tartanair-pano
 ```
 
 Dataset targets can be dataset names, subset paths, or sample paths.
 
-Run `dataset rescan <dataset>` after a downloader or another process changes that dataset, or omit the dataset name to rebuild the complete index.
+Successful dataset download jobs rescan their downloaded dataset by default. Set runner `rescan_after_download: false` to change the runner default. Use `--rescan true` or `--rescan false` to override it for one new job. Run `dataset rescan <dataset>` after another process changes a dataset, or omit the dataset name for all datasets.
 
 ## Jobs
 

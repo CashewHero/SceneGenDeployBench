@@ -7,7 +7,7 @@ from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, call, patch
+from unittest.mock import ANY, Mock, call, patch
 
 from app.config import load_config
 from main import build_parser
@@ -17,6 +17,7 @@ from runner_launchers.docker import (
     _DockerEngineClient,
     _DockerHostContext,
 )
+from execution import dispatch as dispatch_execution
 from execution.script_run import (
     _publish_script_workspace,
     normalize_access,
@@ -348,6 +349,39 @@ class StorageContractTests(unittest.TestCase):
         self.assertEqual(targeted.dataset_name, "example_set1")
         self.assertIsNone(complete.dataset_name)
 
+    def test_dataset_download_command_accepts_rescan_override(self) -> None:
+        parser = build_parser()
+        default = parser.parse_args(["dataset", "download", "example_set1"])
+        enabled = parser.parse_args(
+            ["dataset", "download", "example_set1", "--rescan", "true"]
+        )
+        disabled = parser.parse_args(
+            ["dataset", "download", "example_set1", "--rescan", "false"]
+        )
+        self.assertIsNone(default.rescan)
+        self.assertTrue(enabled.rescan)
+        self.assertFalse(disabled.rescan)
+
+    def test_runner_rescan_after_download_defaults_true_and_accepts_false(
+        self,
+    ) -> None:
+        config = load_config(str(self.config_path))
+        self.assertTrue(
+            config.runners["test_runner@0.1.0"].rescan_after_download
+        )
+        runner_path = self.config_path.parent / "runners" / "test.yaml"
+        runner_path.write_text(
+            RUNNER_CONFIG.replace(
+                "    inputs:\n",
+                "    rescan_after_download: false\n    inputs:\n",
+            ),
+            encoding="utf-8",
+        )
+        config = load_config(str(self.config_path))
+        self.assertFalse(
+            config.runners["test_runner@0.1.0"].rescan_after_download
+        )
+
     def test_dataset_download_job_does_not_rescan_datasets(self) -> None:
         config = load_config(str(self.config_path))
         runner = config.runners["test_runner@0.1.0"]
@@ -362,7 +396,10 @@ class StorageContractTests(unittest.TestCase):
                 "connect_database",
                 return_value=nullcontext(connection),
             ),
-            patch.object(db_storage, "insert_resolved_job_row"),
+            patch.object(
+                db_storage,
+                "insert_resolved_job_row",
+            ) as insert_job,
         ):
             insert_dataset_download_job(
                 config,
@@ -371,9 +408,139 @@ class StorageContractTests(unittest.TestCase):
                 parameters={},
                 timeout_seconds=60,
                 allow_start_outside_window=False,
+                rescan_after_download=False,
             )
         sync_runners.assert_called_once_with(config)
         sync_datasets.assert_not_called()
+        self.assertFalse(
+            insert_job.call_args.kwargs["rescan_after_download"]
+        )
+
+    def test_dataset_download_request_stores_rescan_flag(self) -> None:
+        config = load_config(str(self.config_path))
+        runner = replace(
+            config.runners["test_runner@0.1.0"],
+            rescan_after_download=False,
+        )
+        with patch.object(
+            db_storage,
+            "Jsonb",
+            side_effect=lambda value: value,
+        ):
+            inherited_request = db_storage.insert_resolved_job_row(
+                Mock(),
+                job_id="job-download",
+                runner=runner,
+                identity={
+                    "dataset_name": "example_set1",
+                    "dataset_version": "unversioned",
+                    "external_key": "",
+                    "subset_key": "",
+                    "sample_id": None,
+                    "metadata_json": {"dataset_download": True},
+                },
+                inputs={},
+                parameters={"dataset_name": "example_set1"},
+                timeout_seconds=60,
+                job_type="dataset_download",
+                source_job_id=None,
+                allow_start_outside_window=False,
+                now="2026-07-30T00:00:00Z",
+            )
+            overridden_request = db_storage.insert_resolved_job_row(
+                Mock(),
+                job_id="job-download-override",
+                runner=runner,
+                identity={
+                    "dataset_name": "example_set1",
+                    "dataset_version": "unversioned",
+                    "external_key": "",
+                    "subset_key": "",
+                    "sample_id": None,
+                    "metadata_json": {"dataset_download": True},
+                },
+                inputs={},
+                parameters={"dataset_name": "example_set1"},
+                timeout_seconds=60,
+                job_type="dataset_download",
+                source_job_id=None,
+                allow_start_outside_window=False,
+                now="2026-07-30T00:00:00Z",
+                rescan_after_download=True,
+            )
+        self.assertFalse(
+            inherited_request["job"]["rescan_after_download"]
+        )
+        self.assertTrue(
+            overridden_request["job"]["rescan_after_download"]
+        )
+
+    def test_completed_dataset_download_rescans_only_when_enabled(
+        self,
+    ) -> None:
+        terminal = {
+            "state": "finished",
+            "updated_at": "2026-07-30T00:00:00Z",
+            "result": {"status": "completed"},
+        }
+        base_job = {
+            "job_id": "job-download",
+            "job_type": "dataset_download",
+            "parameters": {"dataset_name": "example_set1"},
+        }
+        completed = {"status": "completed"}
+        with (
+            patch.object(
+                dispatch_execution,
+                "write_job_terminal_result",
+                return_value=completed,
+            ),
+            patch.object(
+                dispatch_execution,
+                "sync_dataset_state",
+                return_value={
+                    "dataset": "example_set1",
+                    "dataset_count": 1,
+                    "sample_count": 2,
+                },
+            ) as sync_datasets,
+        ):
+            dispatch_execution._record_terminal_job(
+                Mock(),
+                batch_id="batch-1",
+                job=SimpleNamespace(
+                    job_id="job-download",
+                    output_dir=Path("/data/output/download"),
+                    request_payload={
+                        "job": {
+                            **base_job,
+                            "rescan_after_download": True,
+                        }
+                    },
+                ),
+                terminal=terminal,
+            )
+            sync_datasets.assert_called_once_with(
+                ANY,
+                dataset_name="example_set1",
+            )
+            sync_datasets.reset_mock()
+            dispatch_execution._record_terminal_job(
+                Mock(),
+                batch_id="batch-2",
+                job=SimpleNamespace(
+                    job_id="job-download-no-rescan",
+                    output_dir=Path("/data/output/download"),
+                    request_payload={
+                        "job": {
+                            **base_job,
+                            "rescan_after_download": False,
+                        }
+                    },
+                ),
+                terminal=terminal,
+            )
+            sync_datasets.assert_not_called()
 
     def test_targeted_dataset_rescan_passes_only_that_dataset(self) -> None:
         config = load_config(str(self.config_path))
