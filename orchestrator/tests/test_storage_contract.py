@@ -317,7 +317,60 @@ class StorageContractTests(unittest.TestCase):
             "AND NOT (runner_selector = ANY(%s))",
             query,
         )
+        self.assertIn("DISTINCT ON (runner_name)", query)
         self.assertEqual(params[0], ["test_runner@0.1.0"])
+
+    def test_recent_batch_runner_history_uses_five_batches(self) -> None:
+        config = load_config(str(self.config_path))
+        cursor = Mock()
+        cursor.fetchall.return_value = [
+            {"runner_name": "runner-a"},
+            {"runner_name": "runner-b"},
+        ]
+        connection = Mock()
+        connection.cursor.return_value = nullcontext(cursor)
+        with patch.object(
+            db_storage,
+            "connect_database",
+            return_value=nullcontext(connection),
+        ):
+            runners = db_storage._recent_batch_runner_names(config)
+
+        self.assertEqual(runners, ["runner-a", "runner-b"])
+        query, params = cursor.execute.call_args.args
+        self.assertIn("ORDER BY updated_at DESC", query)
+        self.assertEqual(
+            params,
+            (db_storage.RECENT_BATCH_RUNNER_HISTORY_SIZE,),
+        )
+        self.assertEqual(db_storage.RECENT_BATCH_RUNNER_HISTORY_SIZE, 5)
+
+    def test_claim_candidates_prefer_other_then_least_recent_runner(
+        self,
+    ) -> None:
+        candidates = [
+            {"job_id": "job-a", "runner_name": "runner-a"},
+            {"job_id": "job-b", "runner_name": "runner-b"},
+            {"job_id": "job-c", "runner_name": "runner-c"},
+        ]
+
+        prioritized = db_storage._prioritize_claim_candidates(
+            candidates,
+            ["runner-a", "runner-b"],
+        )
+        self.assertEqual(
+            [row["runner_name"] for row in prioritized],
+            ["runner-c", "runner-b", "runner-a"],
+        )
+
+        all_recent = db_storage._prioritize_claim_candidates(
+            candidates,
+            ["runner-a", "runner-b", "runner-c"],
+        )
+        self.assertEqual(
+            [row["runner_name"] for row in all_recent],
+            ["runner-c", "runner-b", "runner-a"],
+        )
 
     def test_database_connection_error_is_actionable(self) -> None:
         config = load_config(str(self.config_path))

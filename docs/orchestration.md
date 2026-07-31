@@ -71,6 +71,8 @@ See [Database](database.md#dataset-manifest-data) for data-type details such as 
 7. Persist result JSON, metrics, and artifact metadata.
 8. Shut down the runner when the batch exits.
 
+The scheduler remembers runner names used by the five most recently batches. It prefers a pending runner outside that history or the least recently used runner.
+
 Generator output path:
 
 ```text

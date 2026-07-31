@@ -23,6 +23,7 @@ except ModuleNotFoundError:
 
 
 PENDING_CANDIDATE_LIMIT = 1000
+RECENT_BATCH_RUNNER_HISTORY_SIZE = 5
 
 
 class DatabaseUnavailableError(RuntimeError):
@@ -2230,15 +2231,19 @@ def _claim_candidate_rows(
             cur.execute(
                 """
                 SELECT *
-                FROM jobs
-                WHERE status = 'pending'
-                  AND NOT (runner_selector = ANY(%s))
-                  AND (
-                    runner_selector = ANY(%s)
-                    OR (runner_selector = ANY(%s) AND allow_start_outside_window = TRUE)
-                    OR NOT (runner_selector = ANY(%s))
-                  )
-                ORDER BY created_at
+                FROM (
+                  SELECT DISTINCT ON (runner_name) *
+                  FROM jobs
+                  WHERE status = 'pending'
+                    AND NOT (runner_selector = ANY(%s))
+                    AND (
+                      runner_selector = ANY(%s)
+                      OR (runner_selector = ANY(%s) AND allow_start_outside_window = TRUE)
+                      OR NOT (runner_selector = ANY(%s))
+                    )
+                  ORDER BY runner_name, created_at, job_id
+                ) oldest_by_runner
+                ORDER BY created_at, job_id
                 LIMIT %s
                 """,
                 (
@@ -2250,6 +2255,44 @@ def _claim_candidate_rows(
                 ),
             )
             return list(cur.fetchall())
+
+
+def _recent_batch_runner_names(
+    config: OrchestratorConfig,
+) -> list[str]:
+    with connect_database(config) as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT runner_name
+                FROM batches
+                ORDER BY updated_at DESC, created_at DESC, batch_id DESC
+                LIMIT %s
+                """,
+                (RECENT_BATCH_RUNNER_HISTORY_SIZE,),
+            )
+            return [
+                str(row["runner_name"])
+                for row in cur.fetchall()
+                if str(row.get("runner_name") or "").strip()
+            ]
+
+
+def _prioritize_claim_candidates(
+    candidates: list[dict[str, Any]],
+    recent_runner_names: list[str],
+) -> list[dict[str, Any]]:
+    recent_positions: dict[str, int] = {}
+    for position, runner_name in enumerate(recent_runner_names):
+        recent_positions.setdefault(str(runner_name), position)
+
+    def priority(row: dict[str, Any]) -> tuple[int, int]:
+        position = recent_positions.get(str(row.get("runner_name") or ""))
+        if position is None:
+            return (0, 0)
+        return (1, -position)
+
+    return sorted(candidates, key=priority)
 
 
 def claimable_pending_runner_selectors(
@@ -2299,6 +2342,11 @@ def claim_pending_batch(
         config,
         excluded_runner_selectors=excluded_runner_selectors,
     )
+    if candidates:
+        candidates = _prioritize_claim_candidates(
+            candidates,
+            _recent_batch_runner_names(config),
+        )
 
     for first in candidates:
         runner = config.runners.get(first["runner_selector"])
