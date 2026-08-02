@@ -292,6 +292,7 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline_add.add_argument("pipeline_name", nargs="?")
     pipeline_add.add_argument("-f", "--file", dest="pipeline_file")
     pipeline_add.add_argument("--dataset", help="override the pipeline dataset")
+    pipeline_add.add_argument("--runner", help="override the pipeline runner")
     pipeline_add.add_argument(
         "--matrix",
         action="append",
@@ -1009,11 +1010,12 @@ def handle_pipeline_list(args: argparse.Namespace) -> int:
         return 0
     print(
         render_table(
-            ["PIPELINE", "DATASET", "LANES", "STAGES", "FILE"],
+            ["PIPELINE", "DATASET", "RUNNER", "LANES", "STAGES", "FILE"],
             [
                 {
                     "PIPELINE": row["name"],
                     "DATASET": row["dataset"] or "-",
+                    "RUNNER": row["runner"] or "-",
                     "LANES": row["matrix_lane_count"],
                     "STAGES": row["stage_count"],
                     "FILE": row["path"],
@@ -1041,6 +1043,7 @@ def handle_pipeline_validate(args: argparse.Namespace) -> int:
                 ("Pipeline", payload["name"]),
                 ("File", payload["path"]),
                 ("Dataset", payload["dataset"] or "-"),
+                ("Runner", payload["runner"] or "-"),
                 ("Matrix Lanes", payload["matrix_lane_count"]),
                 ("Stages", ", ".join(payload["stages"])),
             ]
@@ -1054,7 +1057,7 @@ def handle_pipeline_add(args: argparse.Namespace) -> int:
         args.config,
         name=args.pipeline_name,
         file_path=args.pipeline_file,
-        dataset=args.dataset,
+        input_overrides={"dataset": args.dataset, "runner": args.runner},
         matrix_values=args.matrix,
         allow_start_outside_window=args.allow_outside_window,
     )
@@ -1068,6 +1071,7 @@ def handle_pipeline_add(args: argparse.Namespace) -> int:
                 ("Pipeline", payload["pipeline_name"]),
                 ("State", payload["status"]),
                 ("Dataset", payload["dataset_target"]),
+                ("Runner", payload["runner"] or "-"),
                 ("Matrix Lanes", len(payload.get("lanes_json") or [])),
                 ("Created", format_timestamp(payload["created_at_utc"])),
             ]
@@ -1084,12 +1088,13 @@ def handle_pipeline_runs(args: argparse.Namespace) -> int:
         return 0
     print(
         render_table(
-            ["RUN", "PIPELINE", "DATASET", "STATE", "LANES", "UPDATED"],
+            ["RUN", "PIPELINE", "DATASET", "RUNNER", "STATE", "LANES", "UPDATED"],
             [
                 {
                     "RUN": row["pipeline_run_id"],
                     "PIPELINE": row["pipeline_name"],
                     "DATASET": row["dataset_target"],
+                    "RUNNER": row["runner"] or "-",
                     "STATE": row["status"],
                     "LANES": len(row.get("lanes_json") or []),
                     "UPDATED": format_relative_time(row["updated_at_utc"]),
@@ -1114,6 +1119,7 @@ def handle_pipeline_show(args: argparse.Namespace) -> int:
                 ("Pipeline", payload["pipeline_name"]),
                 ("State", payload["status"]),
                 ("Dataset", payload["dataset_target"]),
+                ("Runner", payload["runner"] or "-"),
                 ("Created", format_timestamp(payload["created_at_utc"])),
                 ("Completed", format_timestamp(payload["completed_at_utc"])),
                 ("Failure", payload.get("failure_message") or "-"),
@@ -1124,7 +1130,7 @@ def handle_pipeline_show(args: argparse.Namespace) -> int:
         print()
         print(
             render_table(
-                ["STAGE", "LANE", "SAMPLE", "STATE", "JOB"],
+                ["STAGE", "LANE", "SAMPLE", "STATE", "JOB", "CHILD PIPELINE"],
                 [
                     {
                         "STAGE": row["stage_id"],
@@ -1136,6 +1142,7 @@ def handle_pipeline_show(args: argparse.Namespace) -> int:
                         ),
                         "STATE": row["status"],
                         "JOB": row.get("job_id") or "-",
+                        "CHILD PIPELINE": row.get("child_pipeline_run_id") or "-",
                     }
                     for row in payload["stages"]
                 ],

@@ -35,8 +35,9 @@ def create_pipeline_run(
     config_payload: dict[str, Any],
     lanes: list[dict[str, Any]],
     allow_start_outside_window: bool,
+    pipeline_run_id: str | None = None,
 ) -> dict[str, Any]:
-    run_id = _id("pipeline")
+    run_id = pipeline_run_id or _id("pipeline")
     now = utc_now_timestamp()
     with connect_database(config) as conn:
         with conn.cursor() as cur:
@@ -48,6 +49,7 @@ def create_pipeline_run(
                   allow_start_outside_window, created_at, updated_at
                 )
                 VALUES (%s, %s, 'pending', %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (pipeline_run_id) DO NOTHING
                 """,
                 (
                     run_id,
@@ -227,6 +229,7 @@ def insert_pipeline_stage_execution(
     lane: dict[str, Any],
     identity: dict[str, Any] | None,
     status: str,
+    result: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     stage_execution_id = _id("stage")
     identity = identity or {}
@@ -240,11 +243,11 @@ def insert_pipeline_stage_execution(
                   pipeline_stage_execution_id, pipeline_run_id, stage_id, lane_index,
                   lane_json, dataset_name,
                   dataset_version, external_key, sample_id, status,
-                  created_at, updated_at
+                  result_json, created_at, updated_at
                 )
                 VALUES (
                   %s, %s, %s, %s, %s, %s,
-                  %s, %s, %s, %s, %s, %s
+                  %s, %s, %s, %s, %s, %s, %s
                 )
                 ON CONFLICT (pipeline_run_id, stage_id, lane_index, external_key)
                 DO NOTHING
@@ -261,6 +264,7 @@ def insert_pipeline_stage_execution(
                     external_key,
                     identity.get("sample_id"),
                     status,
+                    _json(result),
                     now,
                     now,
                 ),
@@ -359,6 +363,39 @@ def finish_pipeline_script_stage_execution(
                 (
                     status,
                     _json(result),
+                    now,
+                    now,
+                    failure_message,
+                    pipeline_stage_execution_id,
+                ),
+            )
+            return cur.rowcount == 1
+
+
+def finish_child_pipeline_stage(
+    config: OrchestratorConfig,
+    *,
+    pipeline_stage_execution_id: str,
+    status: str,
+    child_pipeline_run_id: str,
+    failure_message: str | None = None,
+) -> bool:
+    if status not in {"completed", "failed", "cancelled"}:
+        raise ValueError("child pipeline stage status must be terminal")
+    now = utc_now_timestamp()
+    with connect_database(config) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE pipeline_stage_executions
+                SET status = %s, result_json = %s,
+                    updated_at = %s, completed_at = %s,
+                    failure_message = %s
+                WHERE pipeline_stage_execution_id = %s AND status = 'pending'
+                """,
+                (
+                    status,
+                    _json({"child_pipeline_run_id": child_pipeline_run_id}),
                     now,
                     now,
                     failure_message,
@@ -471,6 +508,37 @@ def _stop_pipeline_run(
     job_code: str,
     job_message: str,
 ) -> dict[str, Any]:
+    with connect_database(config) as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT result_json->>'child_pipeline_run_id' AS child_pipeline_run_id
+                FROM pipeline_stage_executions
+                WHERE pipeline_run_id = %s
+                  AND result_json ? 'child_pipeline_run_id'
+                """,
+                (pipeline_run_id,),
+            )
+            child_ids = [
+                str(row["child_pipeline_run_id"])
+                for row in cur.fetchall()
+            ]
+    descendant_ids: list[str] = []
+    for child_id in child_ids:
+        try:
+            child_result = _stop_pipeline_run(
+                config,
+                pipeline_run_id=child_id,
+                status=status,
+                run_message=run_message,
+                job_code=job_code,
+                job_message=job_message,
+            )
+        except ValueError:
+            continue
+        descendant_ids.extend(child_result["child_pipeline_run_ids"])
+        descendant_ids.append(child_id)
+
     now = utc_now_timestamp()
     with connect_database(config) as conn:
         with conn.cursor(row_factory=dict_row) as cur:
@@ -528,6 +596,7 @@ def _stop_pipeline_run(
         "status": status,
         "cancelled_jobs": cancelled_jobs,
         "cancelled_stage_executions": cancelled_stage_executions,
+        "child_pipeline_run_ids": descendant_ids,
     }
 
 

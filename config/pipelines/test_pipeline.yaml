@@ -1,10 +1,11 @@
 pipeline_version: 1
 name: test_pipeline
 dataset: example_set1/city
+runner: test_runner
 
 stages:
   copy:
-    runner: test_runner
+    runner: ${{ runner }}
     inputs:
       data: ${{ dataset }}
 

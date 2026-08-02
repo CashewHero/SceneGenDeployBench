@@ -6,7 +6,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from domain.pipelines import load_pipeline
+from domain.pipelines import (
+    load_pipeline,
+    merge_pipeline_inputs,
+    resolve_static_value,
+)
+from main import build_parser
 from execution.pipelines import (
     _dependency_rows,
     _effective_retention,
@@ -19,6 +24,109 @@ from execution.pipelines import (
 
 
 class PipelineContractTests(unittest.TestCase):
+    def test_pipeline_runner_default_and_cli_override_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "runner-input.yaml"
+            path.write_text(
+                """
+                pipeline_version: 1
+                name: runner_input
+                dataset: test-data
+                runner: test_runner
+                stages:
+                  generate:
+                    runner: ${{ runner }}
+                    inputs:
+                      data: ${{ dataset }}
+                    with:
+                      selected_runner: ${{ runner }}
+                """,
+                encoding="utf-8",
+            )
+
+            definition = load_pipeline(path)
+
+        self.assertEqual(
+            definition.inputs,
+            {"dataset": "test-data", "runner": "test_runner"},
+        )
+        self.assertEqual(definition.raw["runner"], "test_runner")
+        self.assertEqual(definition.stages["generate"]["runner"], "${{ runner }}")
+        resolved_inputs = merge_pipeline_inputs(
+            definition.inputs,
+            {"dataset": "other-data", "runner": "other_runner@0.2.0"},
+        )
+        self.assertEqual(
+            resolved_inputs,
+            {"dataset": "other-data", "runner": "other_runner@0.2.0"},
+        )
+        self.assertEqual(
+            resolve_static_value(
+                definition.stages["generate"]["with"],
+                inputs=resolved_inputs,
+                lane={},
+            ),
+            {"selected_runner": "other_runner@0.2.0"},
+        )
+
+        args = build_parser().parse_args(
+            ["pipeline", "add", "runner_input", "--runner", "other_runner"]
+        )
+        self.assertEqual(args.runner, "other_runner")
+
+    def test_pipeline_runner_reference_requires_a_value(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError, "pipeline input 'runner' is not defined"
+        ):
+            resolve_static_value(
+                "${{ runner }}",
+                inputs={"dataset": "test-data", "runner": None},
+                lane={},
+            )
+
+    def test_nested_pipeline_stage_uses_with_and_rejects_retention(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "parent.yaml"
+            path.write_text(
+                """
+                pipeline_version: 1
+                name: parent
+                dataset: test-data
+                runner: test_runner
+                matrix:
+                  seed: [1, 2]
+                stages:
+                  child:
+                    pipeline: child_pipeline
+                    with:
+                      dataset: ${{ dataset }}
+                      runner: ${{ runner }}
+                      matrix:
+                        seed: ["${{ matrix.seed }}"]
+                """,
+                encoding="utf-8",
+            )
+            definition = load_pipeline(path)
+            stage = definition.stages["child"]
+            self.assertEqual(stage["pipeline"], "child_pipeline")
+            self.assertEqual(stage["with"]["dataset"], "${{ dataset }}")
+            self.assertEqual(stage["with"]["matrix"]["seed"], ["${{ matrix.seed }}"])
+
+            path.write_text(
+                """
+                pipeline_version: 1
+                name: parent
+                dataset: test-data
+                stages:
+                  child:
+                    pipeline: child_pipeline
+                    retention: pipeline
+                """,
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "retention belongs in the child"):
+                load_pipeline(path)
+
     def test_runner_stage_may_have_empty_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "download.yaml"
@@ -180,6 +288,7 @@ class PipelineContractTests(unittest.TestCase):
             context["needs"]["evaluate"][0]["lane_index"],
             1,
         )
+        self.assertIsNone(context["pipeline"]["runner"])
 
     def test_pipeline_retention_removes_script_folder_and_runner_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

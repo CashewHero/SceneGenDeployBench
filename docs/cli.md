@@ -185,11 +185,12 @@ Durations: `30m`, `2h`, `7d`, `1w`.
 deploybench pipeline list
 deploybench pipeline validate <name>
 deploybench pipeline validate --file <path>
-deploybench pipeline add <name> --dataset <target>
-deploybench pipeline add --file <path> --dataset <target>
+deploybench pipeline add <name>
+deploybench pipeline add --file <path>
+deploybench pipeline add <name> --dataset <target> --runner <name-or-selector>
 deploybench pipeline runs
 deploybench pipeline show <pipeline-run-id>
 deploybench pipeline cancel <pipeline-run-id>
 ```
 
-Use repeatable `--matrix key=value1,value2` options to override axes declared by the pipeline. `--allow-outside-window` is applied to runner jobs created by the pipeline.
+`--dataset` and `--runner` override optional top-level pipeline defaults. Use repeatable `--matrix key=value1,value2` options to override axes declared by the pipeline. `--allow-outside-window` is applied to runner jobs created by the pipeline.

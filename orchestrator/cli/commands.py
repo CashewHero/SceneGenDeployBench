@@ -36,6 +36,8 @@ from domain.pipelines import (
     list_pipeline_definitions,
     load_pipeline,
     matrix_lanes,
+    merge_pipeline_inputs,
+    resolve_static_value,
     resolve_pipeline_path,
 )
 from execution.runner_client import get_status
@@ -1200,7 +1202,8 @@ def list_pipelines(config_path: str | None) -> list[dict[str, Any]]:
         {
             "name": definition.name,
             "path": str(definition.path),
-            "dataset": definition.dataset,
+            "dataset": definition.inputs["dataset"],
+            "runner": definition.inputs["runner"],
             "matrix_lane_count": len(matrix_lanes(definition.matrix)),
             "stage_count": len(definition.stages),
         }
@@ -1210,6 +1213,12 @@ def list_pipelines(config_path: str | None) -> list[dict[str, Any]]:
 
 def _pipeline_row_payload(row: dict[str, Any]) -> dict[str, Any]:
     payload = dict(row)
+    payload["child_pipeline_run_id"] = str(
+        dict(payload.get("result_json") or {}).get("child_pipeline_run_id") or ""
+    ) or None
+    payload["runner"] = str(
+        dict(payload.get("config_json") or {}).get("runner") or ""
+    ) or None
     for key in (
         "created_at_utc",
         "updated_at_utc",
@@ -1218,6 +1227,30 @@ def _pipeline_row_payload(row: dict[str, Any]) -> dict[str, Any]:
         if key in payload:
             payload[key] = _timestamp_value(payload.get(key))
     return payload
+
+
+def _validate_nested_stage(
+    config: OrchestratorConfig,
+    stage: dict[str, Any],
+) -> None:
+    child_name = str(stage.get("pipeline") or "").strip()
+    if not child_name:
+        return
+    child = load_pipeline(
+        resolve_pipeline_path(
+            config.catalogs.pipelines,
+            name=child_name,
+            file_path=None,
+        )
+    )
+    unknown_matrix = sorted(
+        set(dict(stage.get("with") or {}).get("matrix") or {}) - set(child.matrix)
+    )
+    if unknown_matrix:
+        raise ValueError(
+            f"nested pipeline {child.name!r} has no matrix keys: "
+            + ", ".join(unknown_matrix)
+        )
 
 
 def validate_pipeline(
@@ -1233,15 +1266,27 @@ def validate_pipeline(
         file_path=file_path,
     )
     definition = load_pipeline(path)
+    inputs = dict(definition.inputs)
+    if inputs["runner"]:
+        inputs["runner"] = resolve_runner(config, inputs["runner"]).selector
     for stage in definition.stages.values():
         runner_selector = str(stage.get("runner") or "").strip()
+        if runner_selector.startswith("${{"):
+            try:
+                runner_selector = str(
+                    resolve_static_value(runner_selector, inputs=inputs, lane={})
+                )
+            except ValueError:
+                continue
         if runner_selector:
             resolve_runner(config, runner_selector)
+        _validate_nested_stage(config, stage)
     return {
         "valid": True,
         "name": definition.name,
         "path": str(definition.path),
-        "dataset": definition.dataset,
+        "dataset": inputs["dataset"],
+        "runner": inputs["runner"],
         "matrix_lane_count": len(matrix_lanes(definition.matrix)),
         "stages": list(definition.stages),
     }
@@ -1252,7 +1297,7 @@ def add_pipeline(
     *,
     name: str | None,
     file_path: str | None,
-    dataset: str | None,
+    input_overrides: dict[str, str | None],
     matrix_values: list[str] | None,
     allow_start_outside_window: bool,
 ) -> dict[str, Any]:
@@ -1267,16 +1312,29 @@ def add_pipeline(
         file_path=file_path,
     )
     definition = load_pipeline(path)
-    dataset_target = str(dataset or definition.dataset or "").strip()
+    inputs = merge_pipeline_inputs(definition.inputs, input_overrides)
+    dataset_target = str(inputs["dataset"] or "").strip()
     if not dataset_target:
         raise ValueError("pipeline dataset is required in YAML or with --dataset")
+    inputs["dataset"] = dataset_target
+    if inputs["runner"]:
+        inputs["runner"] = resolve_runner(config, inputs["runner"]).selector
+
+    stage_runners: list[RunnerDefinition] = []
+    for stage in definition.stages.values():
+        _validate_nested_stage(config, stage)
+        raw_runner = str(stage.get("runner") or "").strip()
+        if raw_runner:
+            stage_runners.append(
+                resolve_runner(
+                    config,
+                    str(resolve_static_value(raw_runner, inputs=inputs, lane={})),
+                )
+            )
+
     has_dataset_downloader = any(
-        (
-            resolve_runner(config, str(stage["runner"])).kind
-            == "dataset_downloader"
-        )
-        for stage in definition.stages.values()
-        if stage.get("runner")
+        stage_runner.kind == "dataset_downloader"
+        for stage_runner in stage_runners
     )
     try:
         _target_sample_rows(config, dataset_target, option_name="pipeline dataset")
@@ -1290,7 +1348,7 @@ def add_pipeline(
         matrix[key] = values
     config_payload = {
         **definition.raw,
-        "dataset": dataset_target,
+        **inputs,
         "matrix": matrix,
     }
     lanes = matrix_lanes(matrix)
@@ -1342,10 +1400,16 @@ def cancel_pipeline(config_path: str | None, pipeline_run_id: str) -> dict[str, 
         config,
         pipeline_run_id=pipeline_run_id,
     )
+    child_ids = list(payload.get("child_pipeline_run_ids") or [])
+    for child_id in child_ids:
+        child = fetch_pipeline_run(config, child_id)
+        if child is not None:
+            cleanup_pipeline_outputs(config, child)
     cleanup_pipeline_outputs(config, run)
     try:
-        payload["stopped_script_containers"] = remove_script_containers(
-            pipeline_run_id=pipeline_run_id,
+        payload["stopped_script_containers"] = sum(
+            remove_script_containers(pipeline_run_id=run_id)
+            for run_id in [pipeline_run_id, *child_ids]
         )
     except RuntimeError:
         payload["stopped_script_containers"] = 0

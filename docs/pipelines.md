@@ -10,10 +10,11 @@ Catalog definitions live in `config/pipelines/*.yaml`:
 pipeline_version: 1
 name: test_pipeline
 dataset: example_set1/city
+runner: test_runner
 
 stages:
   copy:
-    runner: test_runner
+    runner: ${{ runner }}
     inputs:
       data: ${{ dataset }}
 
@@ -35,6 +36,20 @@ Each stage uses exactly one execution form:
 
 - `runner` selects a registered runner. `inputs` contains the `data`, `candidate`, and `references` roles; `with` contains job parameters.
 - `image` plus `run` executes a direct script container. `run` can be a shell string or an exact argument list.
+- `pipeline` starts a durable child pipeline run. `with` may override its `dataset`, `runner`, and declared `matrix` axes.
+
+```yaml
+stages:
+  child:
+    pipeline: experiment_pipeline
+    with:
+      dataset: ${{ dataset }}
+      runner: ${{ runner }}
+      matrix:
+        seed: [1]
+```
+
+`dataset` and `runner` are registered pipeline inputs. Their top-level values are defaults that may be overridden with `--dataset` and `--runner`.
 
 One stage can produce several stage executions across matrix lanes and samples. A runner-backed execution links to one ordinary job; a script execution runs directly without creating a job. `scope: matrix` is the default and runs the stage once per matrix lane; `scope: pipeline` runs it once for the pipeline. A pipeline-scoped dependency feeds every matrix lane, while a pipeline-scoped stage depending on a matrix stage waits for all lanes.
 
@@ -73,6 +88,7 @@ Supported expressions are:
 
 ```text
 ${{ dataset }}
+${{ runner }}
 ${{ matrix.<name> }}
 ${{ stages.<stage>.outputs }}
 ```
@@ -85,7 +101,7 @@ A script receives `/workspace/pipeline.json`:
 
 ```json
 {
-  "pipeline": {"run_id": "...", "name": "...", "dataset": "..."},
+  "pipeline": {"run_id": "...", "name": "...", "dataset": "...", "runner": "test_runner@0.1.0"},
   "stage": {"id": "report", "scope": "pipeline", "lane_index": null, "matrix": {}},
   "needs": {"evaluate": [{"sample": "...", "lane_index": 0, "matrix": {"sigma_px": 2}, "status": "completed", "result": {}}]}
 }
@@ -110,7 +126,7 @@ To expose structured metrics or make selected files addressable through `${{ sta
 
 `output_files` has the same `sample_id -> data_type -> path` shape as a runner result. Paths are relative to `/workspace` and matching paths in the stored result are rewritten to their persistent locations. The response does not control file persistence: missing, malformed, and incomplete responses do not prevent workspace files from being kept.
 
-Every runner and script stage accepts `retention: keep`, `pipeline`, `matrix`, or `none`; the default is `keep`. `pipeline` deletes output when the pipeline finishes, `matrix` deletes it when the matrix lane finishes, and `none` deletes it as soon as the stage execution finishes. On a pipeline-scoped stage, `matrix` behaves as `pipeline`; output from a `none` stage cannot be used as a later stage input. Cleanup physically deletes runner files and their searchable output records, while script cleanup removes the complete execution directory without relying on the script response.
+Every runner and script stage accepts `retention: keep`, `pipeline`, `matrix`, or `none`; the default is `keep`. `pipeline` deletes output when the pipeline finishes, `matrix` deletes it when the matrix lane finishes, and `none` deletes it as soon as the stage execution finishes. On a pipeline-scoped stage, `matrix` behaves as `pipeline`; output from a `none` stage cannot be used as a later stage input. Cleanup physically deletes runner files and their searchable output records, while script cleanup removes the complete execution directory without relying on the script response. A nested pipeline stage does not accept `retention`; retention remains configured on the child pipeline's runner and script stages.
 
 ## Run
 

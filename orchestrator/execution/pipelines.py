@@ -4,6 +4,7 @@ import json
 import logging
 import shutil
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -11,17 +12,24 @@ from app.config import OrchestratorConfig, RunnerDefinition
 from domain.pipelines import (
     STAGE_OUTPUT_REFERENCE_RE,
     PipelineDefinition,
+    load_pipeline,
+    matrix_lanes,
+    merge_pipeline_inputs,
+    resolve_pipeline_path,
     resolve_static_value,
     stage_dependencies,
 )
 from execution.script_run import run_script_container
-from storage.db import _primary_role_data, _target_sample_rows
+from storage.db import _primary_role_data, _target_sample_rows, generated_identifier
 from storage.pipelines import (
     claim_pipeline_script_stage_execution,
+    create_pipeline_run,
     fail_pipeline_run,
+    fetch_pipeline_run,
     fetch_pipeline_runs,
     fetch_pipeline_stage_executions,
     fetch_pipeline_job_outputs,
+    finish_child_pipeline_stage,
     finish_pipeline_script_stage_execution,
     insert_pipeline_stage_job,
     insert_pipeline_stage_execution,
@@ -78,6 +86,12 @@ def _pipeline_run_timestamp(run: dict[str, Any]) -> str:
     run_id = str(run["pipeline_run_id"])
     parts = run_id.split("_", 2)
     return parts[1] if len(parts) == 3 else run_id
+
+
+def _pipeline_inputs(run: dict[str, Any]) -> dict[str, str | None]:
+    inputs = merge_pipeline_inputs(dict(run.get("config_json") or {}))
+    inputs["dataset"] = str(run["dataset_target"])
+    return inputs
 
 
 def _pipeline_run_directory(run: dict[str, Any]) -> Path:
@@ -423,7 +437,7 @@ def _script_context(
         "pipeline": {
             "run_id": str(run["pipeline_run_id"]),
             "name": str(run["pipeline_name"]),
-            "dataset": str(run["dataset_target"]),
+            **_pipeline_inputs(run),
         },
         "stage": {
             "id": stage_id,
@@ -510,13 +524,13 @@ def _materialize_script_stage(
     else:
         resolved_run = resolve_static_value(
             list(raw_run or []),
-            dataset=str(run["dataset_target"]),
+            inputs=_pipeline_inputs(run),
             lane=lane,
         )
         command = [str(item) for item in resolved_run]
     environment = resolve_static_value(
         dict(stage.get("env") or {}),
-        dataset=str(run["dataset_target"]),
+        inputs=_pipeline_inputs(run),
         lane=lane,
     )
     access = stage.get("access") or []
@@ -621,13 +635,22 @@ def _materialize_runner_stage(
             status="skipped",
         )
         return True
-    runner = _runner(config, str(stage["runner"]))
+    runner = _runner(
+        config,
+        str(
+            resolve_static_value(
+                stage["runner"],
+                inputs=_pipeline_inputs(run),
+                lane=lane,
+            )
+        ),
+    )
     parameters = {
         **runner.job_parameters,
         **dict(
             resolve_static_value(
                 stage.get("with") or {},
-                dataset=str(run["dataset_target"]),
+                inputs=_pipeline_inputs(run),
                 lane=lane,
             )
         ),
@@ -681,7 +704,7 @@ def _materialize_runner_stage(
         )
     primary_expression = resolve_static_value(
         configured_inputs[primary_role],
-        dataset=str(run["dataset_target"]),
+        inputs=_pipeline_inputs(run),
         lane=lane,
     )
     sources = _resolve_sources(
@@ -706,7 +729,7 @@ def _materialize_runner_stage(
                 "inputs": {
                     role: resolve_static_value(
                         configured_inputs[role],
-                        dataset=str(run["dataset_target"]),
+                        inputs=_pipeline_inputs(run),
                         lane=lane,
                     )
                     for role in ("data", "candidate", "references")
@@ -749,6 +772,204 @@ def _materialize_runner_stage(
         )
         created = True
     return created
+
+
+def _child_pipeline_config(
+    config: OrchestratorConfig,
+    *,
+    run: dict[str, Any],
+    stage: dict[str, Any],
+    lane: dict[str, Any],
+) -> tuple[PipelineDefinition, str, dict[str, Any], list[dict[str, Any]]]:
+    path = resolve_pipeline_path(
+        config.catalogs.pipelines,
+        name=str(stage["pipeline"]),
+        file_path=None,
+    )
+    definition = load_pipeline(path)
+    ancestors = [
+        *list(dict(run.get("config_json") or {}).get("_pipeline_ancestors") or []),
+        str(run["pipeline_name"]),
+    ]
+    if definition.name in ancestors:
+        raise ValueError(
+            "nested pipeline cycle: " + " -> ".join([*ancestors, definition.name])
+        )
+
+    overrides = dict(
+        resolve_static_value(
+            dict(stage.get("with") or {}),
+            inputs=_pipeline_inputs(run),
+            lane=lane,
+        )
+    )
+    inputs = merge_pipeline_inputs(definition.inputs, overrides)
+    dataset_target = str(inputs["dataset"] or "").strip()
+    if not dataset_target:
+        raise ValueError(
+            f"nested pipeline {definition.name!r} requires with.dataset or a default"
+        )
+    inputs["dataset"] = dataset_target
+    if inputs["runner"]:
+        inputs["runner"] = _runner(config, str(inputs["runner"])).selector
+
+    matrix = dict(definition.matrix)
+    for key, values in dict(overrides.get("matrix") or {}).items():
+        if key not in matrix:
+            raise ValueError(
+                f"nested pipeline {definition.name!r} has no matrix key {key!r}"
+            )
+        matrix[str(key)] = list(values)
+    payload = {
+        **definition.raw,
+        **inputs,
+        "matrix": matrix,
+        "_pipeline_ancestors": ancestors,
+    }
+    return definition, dataset_target, payload, matrix_lanes(matrix)
+
+
+def _stage_timed_out(row: dict[str, Any], timeout_minutes: float) -> bool:
+    created = row.get("created_at_utc")
+    if isinstance(created, str):
+        created = datetime.fromisoformat(created.replace("Z", "+00:00"))
+    if not isinstance(created, datetime):
+        return False
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - created).total_seconds() > timeout_minutes * 60
+
+
+def _materialize_pipeline_stage(
+    config: OrchestratorConfig,
+    *,
+    run: dict[str, Any],
+    stage_id: str,
+    stage: dict[str, Any],
+    stages: dict[str, dict[str, Any]],
+    lane_index: int,
+    lane: dict[str, Any],
+    all_rows: list[dict[str, Any]],
+) -> bool:
+    if not _dependencies_ready(
+        all_rows,
+        stage=stage,
+        stages=stages,
+        lane_index=lane_index,
+    ):
+        return False
+    dependencies = _dependency_rows(
+        all_rows,
+        stage=stage,
+        stages=stages,
+        lane_index=lane_index,
+    )
+    existing = _stage_rows(all_rows, stage_id=stage_id, lane_index=lane_index)
+    if stage["if"] == "success()" and any(
+        row["status"] != "completed" for row in dependencies
+    ):
+        if existing:
+            return False
+        return insert_pipeline_stage_execution(
+            config,
+            pipeline_run_id=str(run["pipeline_run_id"]),
+            stage_id=stage_id,
+            lane_index=lane_index,
+            lane=lane,
+            identity={"external_key": "__pipeline__", "sample_id": "__pipeline__"},
+            status="skipped",
+        ) is not None
+
+    if existing:
+        row = existing[0]
+        if row["status"] != "pending":
+            return False
+        child_id = str(
+            dict(row.get("result_json") or {}).get("child_pipeline_run_id") or ""
+        )
+        if not child_id:
+            raise RuntimeError(f"nested pipeline stage {stage_id!r} lost its child id")
+        child = fetch_pipeline_run(config, child_id) if child_id else None
+        if child is None:
+            definition, dataset_target, payload, child_lanes = _child_pipeline_config(
+                config,
+                run=run,
+                stage=stage,
+                lane=lane,
+            )
+            create_pipeline_run(
+                config,
+                pipeline_name=definition.name,
+                dataset_target=dataset_target,
+                config_path=str(definition.path),
+                config_payload=payload,
+                lanes=child_lanes,
+                allow_start_outside_window=bool(run["allow_start_outside_window"]),
+                pipeline_run_id=child_id,
+            )
+            return True
+        if child["status"] == "pending":
+            if not _stage_timed_out(row, float(stage["timeout-minutes"])):
+                return False
+            message = f"nested pipeline stage {stage_id!r} timed out"
+            try:
+                stopped = fail_pipeline_run(
+                    config,
+                    pipeline_run_id=child_id,
+                    failure_message=message,
+                )
+                for descendant_id in stopped["child_pipeline_run_ids"]:
+                    descendant = fetch_pipeline_run(config, descendant_id)
+                    if descendant is not None:
+                        cleanup_pipeline_outputs(config, descendant)
+            except ValueError:
+                pass
+            cleanup_pipeline_outputs(config, child)
+            return finish_child_pipeline_stage(
+                config,
+                pipeline_stage_execution_id=str(row["pipeline_stage_execution_id"]),
+                status="failed",
+                child_pipeline_run_id=child_id,
+                failure_message=message,
+            )
+        return finish_child_pipeline_stage(
+            config,
+            pipeline_stage_execution_id=str(row["pipeline_stage_execution_id"]),
+            status=str(child["status"]),
+            child_pipeline_run_id=child_id,
+            failure_message=str(child.get("failure_message") or "") or None,
+        )
+
+    definition, dataset_target, payload, child_lanes = _child_pipeline_config(
+        config,
+        run=run,
+        stage=stage,
+        lane=lane,
+    )
+    child_id = generated_identifier("pipeline")
+    created = insert_pipeline_stage_execution(
+        config,
+        pipeline_run_id=str(run["pipeline_run_id"]),
+        stage_id=stage_id,
+        lane_index=lane_index,
+        lane=lane,
+        identity={"external_key": "__pipeline__", "sample_id": "__pipeline__"},
+        status="pending",
+        result={"child_pipeline_run_id": child_id},
+    )
+    if created is None:
+        return False
+    create_pipeline_run(
+        config,
+        pipeline_name=definition.name,
+        dataset_target=dataset_target,
+        config_path=str(definition.path),
+        config_payload=payload,
+        lanes=child_lanes,
+        allow_start_outside_window=bool(run["allow_start_outside_window"]),
+        pipeline_run_id=child_id,
+    )
+    return True
 
 
 def _remove_empty_output_directories(path: Path, *, root: Path) -> None:
@@ -1031,7 +1252,7 @@ def reconcile_pipeline_run(
     definition = PipelineDefinition(
         name=str(run["pipeline_name"]),
         path=Path(str(run["config_path"])),
-        dataset=str(run["dataset_target"]),
+        inputs=_pipeline_inputs(run),
         matrix=dict(run["config_json"].get("matrix") or {}),
         stages=dict(run["config_json"]["stages"]),
         raw=dict(run["config_json"]),
@@ -1055,6 +1276,8 @@ def reconcile_pipeline_run(
             materialize = (
                 _materialize_runner_stage
                 if stage.get("runner")
+                else _materialize_pipeline_stage
+                if stage.get("pipeline")
                 else _materialize_script_stage
             )
             changed = materialize(
@@ -1115,11 +1338,15 @@ def reconcile_pipelines(config: OrchestratorConfig) -> dict[str, Any]:
                 exc,
             )
             try:
-                fail_pipeline_run(
+                stopped = fail_pipeline_run(
                     config,
                     pipeline_run_id=str(run["pipeline_run_id"]),
                     failure_message=str(exc),
                 )
+                for child_id in stopped["child_pipeline_run_ids"]:
+                    child = fetch_pipeline_run(config, child_id)
+                    if child is not None:
+                        cleanup_pipeline_outputs(config, child)
                 cleanup_pipeline_outputs(config, run)
             except ValueError:
                 # A concurrent user cancellation already made the run terminal.
