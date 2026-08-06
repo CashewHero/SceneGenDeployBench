@@ -20,7 +20,12 @@ from domain.pipelines import (
     stage_dependencies,
 )
 from execution.script_run import run_script_container
-from storage.db import _primary_role_data, _target_sample_rows, generated_identifier
+from storage.db import (
+    _primary_role_data,
+    _target_sample_rows,
+    generated_identifier,
+    normalize_output_metadata,
+)
 from storage.pipelines import (
     claim_pipeline_script_stage_execution,
     create_pipeline_run,
@@ -47,6 +52,7 @@ class SourceItem:
     identity: dict[str, Any]
     data: dict[str, Any]
     source_job_id: str | None = None
+    output_metadata: dict[str, Any] | None = None
 
 
 def _runner(config: OrchestratorConfig, selector: str) -> RunnerDefinition:
@@ -158,6 +164,9 @@ def _target_sources(config: OrchestratorConfig, target: str) -> list[SourceItem]
             identity=_identity(row),
             data=_primary_role_data(row, from_output=from_output, role="pipeline"),
             source_job_id=str(row.get("source_job_id") or "") or None,
+            output_metadata=normalize_output_metadata(
+                dict(row.get("output_metadata_json") or {}).get("output_metadata")
+            ),
         )
         for row in rows
     ]
@@ -182,7 +191,8 @@ def _stage_output_sources(rows: list[dict[str, Any]]) -> list[SourceItem]:
     for row in rows:
         if row["status"] != "completed":
             continue
-        output_files = dict(row.get("result_json") or {}).get("output_files")
+        result = dict(row.get("result_json") or {})
+        output_files = result.get("output_files")
         if not isinstance(output_files, dict) or not output_files:
             continue
         row_sample_id = str(row.get("sample_id") or "")
@@ -208,6 +218,9 @@ def _stage_output_sources(rows: list[dict[str, Any]]) -> list[SourceItem]:
                     identity=identity,
                     data=dict(sample_data),
                     source_job_id=str(row.get("job_id") or "") or None,
+                    output_metadata=normalize_output_metadata(
+                        result.get("output_metadata")
+                    ),
                 )
             )
     return sources
@@ -758,6 +771,7 @@ def _materialize_runner_stage(
                 "evaluation" if runner.kind == "evaluator" else "generation"
             ),
             source_job_id=source_job_id,
+            primary_output_metadata=source.output_metadata,
         )
         created = created or job_id is not None
     if not sources and stage_dependencies(stage) and not existing:

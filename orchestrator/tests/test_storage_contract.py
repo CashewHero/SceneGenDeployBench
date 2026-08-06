@@ -528,6 +528,41 @@ class StorageContractTests(unittest.TestCase):
             overridden_request["job"]["rescan_after_download"]
         )
 
+    def test_job_request_includes_primary_output_metadata(self) -> None:
+        config = load_config(str(self.config_path))
+        runner = config.runners["test_runner@0.1.0"]
+        with patch.object(
+            db_storage,
+            "Jsonb",
+            side_effect=lambda value: value,
+        ):
+            request = db_storage.insert_resolved_job_row(
+                Mock(),
+                job_id="job-evaluation",
+                runner=runner,
+                identity={
+                    "dataset_name": "example_set1",
+                    "dataset_version": "1",
+                    "external_key": "sample-1",
+                    "subset_key": "",
+                    "sample_id": "sample-1",
+                    "metadata_json": {},
+                },
+                inputs={},
+                parameters={},
+                timeout_seconds=60,
+                job_type="evaluation",
+                source_job_id="job-generation",
+                allow_start_outside_window=False,
+                now="2026-08-06T00:00:00Z",
+                primary_output_metadata={"scene_scale": 0.7},
+            )
+
+        self.assertEqual(
+            request["job"]["primary_output_metadata"],
+            {"scene_scale": 0.7},
+        )
+
     def test_completed_dataset_download_rescans_only_when_enabled(
         self,
     ) -> None:
@@ -653,6 +688,49 @@ class StorageContractTests(unittest.TestCase):
             },
         )
         self.assertEqual(data_types, ["image", "camera_pose"])
+
+    def test_scene_scale_must_be_positive_and_finite(self) -> None:
+        self.assertEqual(
+            db_storage.normalize_output_metadata({"scene_scale": 0.7}),
+            {"scene_scale": 0.7},
+        )
+        for value in (True, 0, -1, float("inf"), float("nan"), "0.7"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "scene_scale"):
+                    db_storage.normalize_output_metadata({"scene_scale": value})
+
+    def test_output_sample_stores_runner_output_metadata(self) -> None:
+        cursor = Mock()
+        with patch.object(
+            db_storage,
+            "Jsonb",
+            side_effect=lambda value: value,
+        ):
+            db_storage._upsert_output_sample(
+                cursor,
+                row={
+                    "job_id": "job-generation",
+                    "runner_selector": "generator@1.0.0",
+                    "runner_name": "generator",
+                    "runner_version": "1.0.0",
+                    "dataset_name": "example_set1",
+                    "dataset_version": "1",
+                    "external_key": "sample-1",
+                    "subset_key": "",
+                    "sample_id": "sample-1",
+                    "sample_metadata_json": {"projection": "equirectangular"},
+                },
+                output_dir="/data/output/generator/sample-1",
+                output_files={"sample-1": {"3dgs": "scene.ply"}},
+                output_metadata={"scene_scale": 0.7},
+                now="2026-08-06T00:00:00Z",
+            )
+
+        parameters = cursor.execute.call_args.args[1]
+        self.assertEqual(
+            parameters[11]["output_metadata"],
+            {"scene_scale": 0.7},
+        )
 
     def test_script_run_options_are_explicit(self) -> None:
         self.assertEqual(

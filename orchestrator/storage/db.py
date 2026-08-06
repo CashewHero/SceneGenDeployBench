@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -469,12 +470,36 @@ def output_sample_payload(
     return outputs, data_types
 
 
+def normalize_output_metadata(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("output_metadata must be an object")
+
+    metadata = dict(value)
+    if "scene_scale" not in metadata:
+        return metadata
+    raw_scale = metadata["scene_scale"]
+    if isinstance(raw_scale, bool) or not isinstance(raw_scale, (int, float)):
+        raise ValueError(
+            "output_metadata.scene_scale must be a positive finite number"
+        )
+    scene_scale = float(raw_scale)
+    if not math.isfinite(scene_scale) or scene_scale <= 0:
+        raise ValueError(
+            "output_metadata.scene_scale must be a positive finite number"
+        )
+    metadata["scene_scale"] = scene_scale
+    return metadata
+
+
 def _upsert_output_sample(
     cur,
     *,
     row: dict[str, Any],
     output_dir: str,
     output_files: Any,
+    output_metadata: Any,
     now: str,
 ) -> None:
     outputs, data_types = output_sample_payload(output_dir, output_files)
@@ -482,6 +507,9 @@ def _upsert_output_sample(
         cur.execute("DELETE FROM output_samples WHERE source_job_id = %s", (row["job_id"],))
         return
     metadata = dict(row.get("sample_metadata_json") or {})
+    normalized_output_metadata = normalize_output_metadata(output_metadata)
+    if normalized_output_metadata:
+        metadata["output_metadata"] = normalized_output_metadata
     metadata.update(
         {
             "source_job_id": row["job_id"],
@@ -1405,6 +1433,7 @@ def insert_resolved_job_row(
     rescan_after_download: bool | None = None,
     pipeline_run_id: str | None = None,
     pipeline_stage_execution_id: str | None = None,
+    primary_output_metadata: Any = None,
 ) -> dict[str, Any]:
     metadata = dict(identity.get("metadata_json") or {})
     primary_sample = str(
@@ -1432,6 +1461,9 @@ def insert_resolved_job_row(
         job_payload["primary_sample"] = primary_sample
     if metadata:
         job_payload["primary_sample_metadata"] = metadata
+    normalized_output_metadata = normalize_output_metadata(primary_output_metadata)
+    if normalized_output_metadata:
+        job_payload["primary_output_metadata"] = normalized_output_metadata
     request_payload = {
         "contract_version": runner.contract_version,
         "job": job_payload,
@@ -1610,6 +1642,9 @@ def insert_jobs(
                     else data_row if data_from_output else sample_row
                 )
                 upstream_metadata = dict(upstream_row.get("output_metadata_json") or {})
+                primary_output_metadata = normalize_output_metadata(
+                    upstream_metadata.get("output_metadata")
+                )
                 metadata_source_job_id = upstream_row.get(
                     "source_job_id"
                 ) or upstream_metadata.get("source_job_id")
@@ -1724,6 +1759,7 @@ def insert_jobs(
                     source_job_id=sample_source_job_id,
                     allow_start_outside_window=allow_start_outside_window,
                     now=now,
+                    primary_output_metadata=primary_output_metadata,
                 )
                 created_jobs.append(
                     {
@@ -2638,6 +2674,7 @@ def write_job_terminal_result(
                     row=row,
                     output_dir=output_dir,
                     output_files=result_payload.get("output_files"),
+                    output_metadata=result_payload.get("output_metadata"),
                     now=now,
                 )
             else:

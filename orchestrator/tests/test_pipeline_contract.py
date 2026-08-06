@@ -238,7 +238,8 @@ class PipelineContractTests(unittest.TestCase):
                         "output_files": {
                             "sample-a": {"image": "/data/pipelines/a.png"},
                             "sample-b": {"table": "/data/pipelines/b.csv"},
-                        }
+                        },
+                        "output_metadata": {"scene_scale": 0.7},
                     },
                 }
             ]
@@ -253,6 +254,10 @@ class PipelineContractTests(unittest.TestCase):
                 ("sample-a", {"image": "/data/pipelines/a.png"}),
                 ("sample-b", {"table": "/data/pipelines/b.csv"}),
             ],
+        )
+        self.assertEqual(
+            [source.output_metadata for source in sources],
+            [{"scene_scale": 0.7}, {"scene_scale": 0.7}],
         )
 
     def test_script_context_includes_dependency_matrix(self) -> None:

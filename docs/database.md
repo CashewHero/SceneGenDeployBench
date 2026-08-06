@@ -89,6 +89,7 @@ pipeline_runs ----< pipeline_stage_executions
 - original dataset identity (`dataset_name`, `dataset_version`, `external_key`)
 - `outputs_json`: reusable files keyed by id and then semantic data type
 - `data_types_json`
+- `metadata_json`: inherited sample and provenance metadata, with runner-reported output metadata under `output_metadata`
 
 `pipeline_runs`:
 

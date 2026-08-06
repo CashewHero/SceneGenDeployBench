@@ -420,6 +420,7 @@ def insert_pipeline_stage_job(
     allow_start_outside_window: bool,
     job_type: str,
     source_job_id: str | None,
+    primary_output_metadata: Any = None,
 ) -> str | None:
     """Create the pipeline stage record and ordinary job in one transaction."""
     stage_execution_id = _id("stage")
@@ -473,6 +474,7 @@ def insert_pipeline_stage_job(
                 allow_start_outside_window=allow_start_outside_window,
                 pipeline_run_id=pipeline_run_id,
                 pipeline_stage_execution_id=stage_execution_id,
+                primary_output_metadata=primary_output_metadata,
                 now=now,
             )
     return job_id
