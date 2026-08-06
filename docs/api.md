@@ -103,6 +103,7 @@ The orchestrator validates catalog requirements before dispatch. Adapter validat
 - `job_type`: runner role selected by the catalog
 - `primary_sample`: input sample that owns the job
 - `primary_sample_metadata`: inherited dataset metadata; omitted when empty
+- `primary_output_metadata`: metadata reported by the job that produced the primary generated input; omitted when empty
 - `source_job_id`: upstream job identity when applicable
 - `attempt`: current retry attempt
 - `timeout_seconds`: required adapter timeout
@@ -154,6 +155,7 @@ An accepted response includes `accepted: true` and `state: "running"`.
       "3dgs": "3DGS-high-a1b2c3d4.ply"
     }
   },
+  "output_metadata": {"scene_scale": 1.0},
   "metrics": [],
   "artifacts": [
     {"artifact_type": "job_log", "path": "runner-high-a1b2c3d4.log"},
@@ -184,6 +186,7 @@ Failure shape:
 ## Result Rules
 
 - `output_files` uses `sample_id -> data_type -> relative path` and is omitted when the runner produces no reusable files.
+- `output_metadata` describes the generated outputs as a group and is omitted when empty. `scene_scale` is a positive finite number: displacement from the primary viewpoint in dataset space is multiplied by it before rendering in the generated scene.
 - The orchestrator resolves and stores the sample/data-type mapping in `output_files`; output targets can reuse it in any input role.
 - Construct `output_files` explicitly; do not infer it by scanning the output directory.
 - Keep semantic output keys such as `image`, `3dgs`, or `mesh`; uniqueness belongs in the filename.
