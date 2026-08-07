@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json
 import logging
@@ -16,6 +17,11 @@ from .base import LauncherPreflightResult, RunnerLaunchContext
 
 
 logger = logging.getLogger("scenegendeploybench.docker")
+
+
+_RUNNER_CONTAINER_PREFIX = "scenegendeploybench-run-"
+_RUNNER_CONTAINER_HASH_LENGTH = 12
+_DNS_LABEL_MAX_LENGTH = 63
 
 
 class _UnixSocketHTTPConnection(http.client.HTTPConnection):
@@ -412,12 +418,22 @@ class DockerRunnerLauncher:
 
     def _build_container_name(self) -> str:
         # The runner endpoint uses the container name as an in-network host.
-        # Keep it DNS-safe: Docker names may allow underscores, but they are
-        # not reliably resolvable through libc DNS lookups inside containers.
-        selector = re.sub(r"[^a-z0-9-]+", "-", self.context.runner.selector.lower()).strip("-")
-        selector = re.sub(r"-{2,}", "-", selector)
-        selector = selector or "runner"
-        return f"scenegendeploybench-runner-{selector}-{uuid.uuid4().hex[:12]}"
+        # Keep the whole label within the DNS limit, while hashing the complete
+        # selector so truncation and omitted version text do not affect identity.
+        runner_slug = re.sub(
+            r"[^a-z0-9-]+",
+            "-",
+            self.context.runner.runner.lower(),
+        ).strip("-")
+        runner_slug = re.sub(r"-{2,}", "-", runner_slug) or "runner"
+        launch_id = uuid.uuid4().hex
+        identity_hash = hashlib.sha256(
+            f"{self.context.runner.selector}\0{launch_id}".encode("utf-8")
+        ).hexdigest()[:_RUNNER_CONTAINER_HASH_LENGTH]
+        suffix = f"-{identity_hash}"
+        max_slug_length = _DNS_LABEL_MAX_LENGTH - len(_RUNNER_CONTAINER_PREFIX) - len(suffix)
+        runner_slug = runner_slug[:max_slug_length].rstrip("-") or "runner"
+        return f"{_RUNNER_CONTAINER_PREFIX}{runner_slug}{suffix}"
 
     def _container_env(self) -> list[str]:
         env_payload = {
