@@ -12,13 +12,13 @@ import logging
 import os
 import random
 import re
+import shutil
 import sys
 import time
 import traceback
 from pathlib import Path
 from typing import Any
 
-from runner_wrapper.files import publish_file
 from runner_wrapper.job_logging import tee_job_output
 from runner_wrapper.measurements import ResourceMonitor
 
@@ -89,7 +89,7 @@ def _normalize_inputs(raw_inputs: Any) -> dict[str, dict[str, dict[str, Any]]]:
 
 def _copy_inputs(
     samples: dict[str, dict[str, Any]],
-    output_root: Path,
+    workspace_root: Path,
     variant: str,
 ) -> tuple[dict[str, dict[str, str]], int]:
     output_files: dict[str, dict[str, str]] = {}
@@ -107,9 +107,9 @@ def _copy_inputs(
                 f"{_safe_role(sample_id)}-{_safe_role(data_type)}-"
                 f"{variant}{src_path.suffix}"
             )
-            dst_path = output_root / dst_name
-            publish_file(src_path, dst_path)
-            sample_outputs[data_type] = str(dst_path.relative_to(output_root))
+            dst_path = workspace_root / dst_name
+            shutil.copyfile(src_path, dst_path)
+            sample_outputs[data_type] = str(dst_path.relative_to(workspace_root))
             copied += 1
         if sample_outputs:
             output_files[sample_id] = sample_outputs
@@ -160,16 +160,16 @@ def _random_evaluation_metrics() -> list[dict[str, Any]]:
 def run_job(job_request: dict[str, Any]) -> dict[str, Any]:
     started_at = time.time()
     runtime = job_request["runtime"]
-    output_root = Path(runtime["output_dir"])
-    output_root.mkdir(parents=True, exist_ok=True)
+    workspace_root = Path(runtime["workspace_dir"])
+    workspace_root.mkdir(parents=True, exist_ok=True)
     parameters = job_request.get("job", {}).get("parameters") or {}
     variant = _parameter_variant(parameters)
-    log_path = output_root / f"runner-{variant}.log"
+    log_path = workspace_root / f"runner-{variant}.log"
     with tee_job_output(log_path):
         return _run_job_logged(
             job_request,
             started_at,
-            output_root,
+            workspace_root,
             log_path,
             variant,
         )
@@ -178,7 +178,7 @@ def run_job(job_request: dict[str, Any]) -> dict[str, Any]:
 def _run_job_logged(
     job_request: dict[str, Any],
     started_at: float,
-    output_root: Path,
+    workspace_root: Path,
     log_path: Path,
     variant: str,
 ) -> dict[str, Any]:
@@ -195,19 +195,19 @@ def _run_job_logged(
             for sample_id, sample_data in samples.items()
             for data_type, value in sample_data.items()
         }
-        monitor = ResourceMonitor(sample_data=monitor_data, output_dir=output_root)
+        monitor = ResourceMonitor(sample_data=monitor_data, output_dir=workspace_root)
         monitor.start()
         logger.info(
             event_message(
                 "adapter_run_started",
                 job_id=job["job_id"],
                 batch_id=job.get("batch_id"),
-                output_dir=runtime["output_dir"],
+                workspace_dir=runtime["workspace_dir"],
                 input_roles=sorted(inputs),
             )
         )
 
-        metrics_path = output_root / f"metrics-{variant}.json"
+        metrics_path = workspace_root / f"metrics-{variant}.json"
         print(f"test runner job {job['job_id']} started", flush=True)
 
         sleep_seconds = _sleep_range_seconds()
@@ -222,7 +222,7 @@ def _run_job_logged(
             print("test runner copying data inputs", flush=True)
             output_files, copied_input_count = _copy_inputs(
                 data_samples,
-                output_root,
+                workspace_root,
                 variant,
             )
         logger.info(

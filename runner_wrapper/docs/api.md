@@ -127,7 +127,7 @@ The CLI `--dataset`, `--candidate`, and `--reference` selectors populate these r
 
 ### Runtime And Environment
 
-`runtime.output_dir` is the only per-job runtime path. Write every durable job file below it. Derive temporary job space from `job.job_id` under `/tmp`, and use `PATH_MODEL_CACHE` for reusable downloaded assets.
+`runtime.output_dir` is the only per-job runtime path in the request and is the final destination for durable job files. Use `PATH_MODEL_CACHE` for reusable downloaded assets.
 
 Runner containers receive shared `PATH_DATASETS`, `PATH_MODEL_CACHE`, `PATH_OUTPUT`, and read-only `PATH_PIPELINES` variables. The wrapper also injects `RUNNER_PORT`, `RUNNER_NAME`, `RUNNER_TYPE`, `RUNNER_VERSION`, `RUNNER_CONTRACT_VERSION`, and `RUNNER_STARTUP_TIMEOUT_SECONDS`. The image configures `RUNNER_ADAPTER` and `RUNNER_IDLE_TIMEOUT_SECONDS`; the latter stops an inactive server after status polling ends. Use these values through `server.py`; do not hardcode a second identity or port in the adapter.
 
