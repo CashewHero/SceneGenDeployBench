@@ -188,9 +188,10 @@ deploybench pipeline validate --file <path>
 deploybench pipeline add <name>
 deploybench pipeline add --file <path>
 deploybench pipeline add <name> --dataset <target> --runner <name-or-selector>
+deploybench pipeline add <name> --set key=value
 deploybench pipeline runs
 deploybench pipeline show <pipeline-run-id>
 deploybench pipeline cancel <pipeline-run-id>
 ```
 
-`--dataset` and `--runner` override optional top-level pipeline defaults. Use repeatable `--matrix key=value1,value2` options to override axes declared by the pipeline. `--allow-outside-window` is applied to runner jobs created by the pipeline.
+`--dataset` and `--runner` override optional top-level pipeline defaults. Use repeatable `--set key=value` options to override declared pipeline parameters and `--matrix key=value1,value2` options to override declared axes. `--allow-outside-window` is applied to runner jobs created by the pipeline.

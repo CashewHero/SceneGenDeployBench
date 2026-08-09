@@ -6,13 +6,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from cli.commands import parse_key_value_settings
 from domain.pipelines import (
     load_pipeline,
     merge_pipeline_inputs,
+    merge_pipeline_parameters,
     resolve_static_value,
 )
 from main import build_parser
 from execution.pipelines import (
+    _child_pipeline_config,
     _dependency_rows,
     _effective_retention,
     _script_context,
@@ -84,6 +87,58 @@ class PipelineContractTests(unittest.TestCase):
                 lane={},
             )
 
+    def test_pipeline_parameters_resolve_and_cli_accepts_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "parameters.yaml"
+            path.write_text(
+                """
+                pipeline_version: 1
+                name: parameters
+                parameters:
+                  reference_count: 60
+                  save_outputs: false
+                stages:
+                  prepare:
+                    image: python:3
+                    env:
+                      REFERENCE_COUNT: ${{ parameters.reference_count }}
+                    run:
+                      - python
+                      - -c
+                      - pass
+                """,
+                encoding="utf-8",
+            )
+            definition = load_pipeline(path)
+
+        parameters = merge_pipeline_parameters(
+            definition.parameters,
+            {"reference_count": 80},
+        )
+        self.assertEqual(
+            resolve_static_value(
+                definition.stages["prepare"]["env"],
+                inputs=definition.inputs,
+                lane={},
+                parameters=parameters,
+            ),
+            {"REFERENCE_COUNT": 80},
+        )
+        with self.assertRaisesRegex(ValueError, "has no parameters: missing"):
+            merge_pipeline_parameters(definition.parameters, {"missing": 1})
+
+        args = build_parser().parse_args(
+            ["pipeline", "add", "parameters", "--set", "reference_count=80"]
+        )
+        self.assertEqual(args.settings, ["reference_count=80"])
+        self.assertEqual(
+            parse_key_value_settings(
+                ["initial_scene_scale_overwrite=-0.7"],
+                {"initial_scene_scale_overwrite": None},
+            ),
+            {"initial_scene_scale_overwrite": -0.7},
+        )
+
     def test_nested_pipeline_stage_uses_with_and_rejects_retention(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "parent.yaml"
@@ -95,22 +150,30 @@ class PipelineContractTests(unittest.TestCase):
                 runner: test_runner
                 matrix:
                   seed: [1, 2]
+                parameters:
+                  reference_count: 60
                 stages:
                   child:
                     pipeline: child_pipeline
+                    dataset: ${{ dataset }}
+                    runner: ${{ runner }}
+                    matrix:
+                      seed: ["${{ matrix.seed }}"]
                     with:
-                      dataset: ${{ dataset }}
-                      runner: ${{ runner }}
-                      matrix:
-                        seed: ["${{ matrix.seed }}"]
+                      reference_count: ${{ parameters.reference_count }}
                 """,
                 encoding="utf-8",
             )
             definition = load_pipeline(path)
             stage = definition.stages["child"]
             self.assertEqual(stage["pipeline"], "child_pipeline")
-            self.assertEqual(stage["with"]["dataset"], "${{ dataset }}")
-            self.assertEqual(stage["with"]["matrix"]["seed"], ["${{ matrix.seed }}"])
+            self.assertEqual(stage["dataset"], "${{ dataset }}")
+            self.assertEqual(stage["runner"], "${{ runner }}")
+            self.assertEqual(
+                stage["with"]["reference_count"],
+                "${{ parameters.reference_count }}",
+            )
+            self.assertEqual(stage["matrix"]["seed"], ["${{ matrix.seed }}"])
 
             path.write_text(
                 """
@@ -126,6 +189,64 @@ class PipelineContractTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "retention belongs in the child"):
                 load_pipeline(path)
+
+    def test_nested_pipeline_stage_resolves_separate_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            catalog = Path(temp_dir)
+            child_path = catalog / "child.yaml"
+            child_path.write_text(
+                """
+                pipeline_version: 1
+                name: child
+                dataset: child-data
+                runner: child-runner
+                parameters:
+                  reference_count: 10
+                matrix:
+                  seed: [0]
+                stages:
+                  prepare:
+                    image: python:3
+                    run: [python, -c, pass]
+                """,
+                encoding="utf-8",
+            )
+            stage = {
+                "pipeline": "child",
+                "dataset": "${{ dataset }}",
+                "runner": "${{ runner }}",
+                "matrix": {"seed": ["${{ matrix.seed }}"]},
+                "with": {
+                    "reference_count": "${{ parameters.reference_count }}"
+                },
+            }
+            run = {
+                "pipeline_name": "parent",
+                "dataset_target": "parent-data",
+                "config_json": {
+                    "runner": "parent-runner@0.1.0",
+                    "parameters": {"reference_count": 60},
+                },
+            }
+            config = SimpleNamespace(
+                catalogs=SimpleNamespace(pipelines=catalog),
+            )
+            with patch(
+                "execution.pipelines._runner",
+                return_value=SimpleNamespace(selector="parent-runner@0.1.0"),
+            ):
+                _, dataset, payload, lanes = _child_pipeline_config(
+                    config,
+                    run=run,
+                    stage=stage,
+                    lane={"seed": 2},
+                )
+
+        self.assertEqual(dataset, "parent-data")
+        self.assertEqual(payload["runner"], "parent-runner@0.1.0")
+        self.assertEqual(payload["parameters"], {"reference_count": 60})
+        self.assertEqual(payload["matrix"], {"seed": [2]})
+        self.assertEqual(lanes, [{"seed": 2}])
 
     def test_runner_stage_may_have_empty_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -266,6 +387,7 @@ class PipelineContractTests(unittest.TestCase):
                 "pipeline_run_id": "pipeline_20260725T120000_deadbeef",
                 "pipeline_name": "example",
                 "dataset_target": "example-data",
+                "config_json": {"parameters": {"reference_count": 60}},
             },
             stage_id="report",
             stage={"scope": "pipeline"},
@@ -294,6 +416,10 @@ class PipelineContractTests(unittest.TestCase):
             1,
         )
         self.assertIsNone(context["pipeline"]["runner"])
+        self.assertEqual(
+            context["pipeline"]["parameters"],
+            {"reference_count": 60},
+        )
 
     def test_pipeline_retention_removes_script_folder_and_runner_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

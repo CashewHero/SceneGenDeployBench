@@ -17,11 +17,12 @@ PIPELINE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 # Pipeline defaults and expressions share this small input registry.
 PIPELINE_INPUT_NAMES = ("dataset", "runner")
 PIPELINE_INPUT_PATTERN = "|".join(re.escape(name) for name in PIPELINE_INPUT_NAMES)
+PARAMETER_REFERENCE = r"parameters\.[A-Za-z_][A-Za-z0-9_]*"
 STATIC_REFERENCE_RE = re.compile(
-    rf"^\$\{{\{{\s*({PIPELINE_INPUT_PATTERN}|matrix\.[A-Za-z_][A-Za-z0-9_]*)\s*\}}\}}$"
+    rf"^\$\{{\{{\s*({PIPELINE_INPUT_PATTERN}|{PARAMETER_REFERENCE}|matrix\.[A-Za-z_][A-Za-z0-9_]*)\s*\}}\}}$"
 )
-PIPELINE_INPUT_REFERENCE_RE = re.compile(
-    rf"^\$\{{\{{\s*({PIPELINE_INPUT_PATTERN})\s*\}}\}}$"
+RUNNER_REFERENCE_RE = re.compile(
+    rf"^\$\{{\{{\s*(runner|{PARAMETER_REFERENCE})\s*\}}\}}$"
 )
 INPUT_REFERENCE_RE = re.compile(
     r"^\$\{\{\s*(dataset|stages\.[A-Za-z_][A-Za-z0-9_]*\.outputs)\s*\}\}$"
@@ -44,11 +45,25 @@ def merge_pipeline_inputs(
     return resolved
 
 
+def merge_pipeline_parameters(
+    defaults: dict[str, Any],
+    overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    override_values = overrides or {}
+    unknown = sorted(set(override_values) - set(defaults))
+    if unknown:
+        raise ValueError(
+            "pipeline has no parameters: " + ", ".join(unknown)
+        )
+    return {**defaults, **override_values}
+
+
 @dataclass(frozen=True)
 class PipelineDefinition:
     name: str
     path: Path
     inputs: dict[str, str | None]
+    parameters: dict[str, Any]
     matrix: dict[str, list[Any]]
     stages: dict[str, dict[str, Any]]
     raw: dict[str, Any]
@@ -165,6 +180,19 @@ def _normalize_matrix(value: Any, field_name: str) -> dict[str, list[Any]]:
     return matrix
 
 
+def _normalize_parameters(value: Any, field_name: str) -> dict[str, Any]:
+    raw_parameters = value or {}
+    if not isinstance(raw_parameters, dict):
+        raise ValueError(f"{field_name} must be a mapping")
+    parameters: dict[str, Any] = {}
+    for raw_key, parameter in raw_parameters.items():
+        key = str(raw_key).strip()
+        if not ID_RE.fullmatch(key):
+            raise ValueError(f"{field_name} contains invalid key {key!r}")
+        parameters[key] = parameter
+    return parameters
+
+
 def _validate_dependency_graph(path: Path, stages: dict[str, dict[str, Any]]) -> None:
     for stage_id, stage in stages.items():
         for dependency in stage_dependencies(stage):
@@ -199,7 +227,14 @@ def load_pipeline(path: Path) -> PipelineDefinition:
         raise ValueError(f"{path} uses unsupported pipeline_version {version}")
     unsupported_top_level = sorted(
         set(raw)
-        - {"pipeline_version", "name", "matrix", "stages", *PIPELINE_INPUT_NAMES}
+        - {
+            "pipeline_version",
+            "name",
+            "parameters",
+            "matrix",
+            "stages",
+            *PIPELINE_INPUT_NAMES,
+        }
     )
     if unsupported_top_level:
         raise ValueError(
@@ -212,6 +247,7 @@ def load_pipeline(path: Path) -> PipelineDefinition:
             f"{path}.name must use letters, numbers, underscores, or hyphens"
         )
     pipeline_inputs = merge_pipeline_inputs(raw)
+    parameters = _normalize_parameters(raw.get("parameters"), f"{path}.parameters")
 
     matrix = _normalize_matrix(raw.get("matrix"), f"{path}.matrix")
 
@@ -221,7 +257,7 @@ def load_pipeline(path: Path) -> PipelineDefinition:
     stages: dict[str, dict[str, Any]] = {}
     common_fields = {"needs", "if", "scope", "timeout-minutes", "retention"}
     runner_fields = {"runner", "inputs", "with"}
-    pipeline_fields = {"pipeline", "with"}
+    pipeline_fields = {"pipeline", "dataset", "runner", "matrix", "with"}
     script_fields = {
         "image",
         "run",
@@ -237,9 +273,11 @@ def load_pipeline(path: Path) -> PipelineDefinition:
         if not isinstance(raw_stage, dict):
             raise ValueError(f"{path}.stages.{stage_id} must be a mapping")
         stage = dict(raw_stage)
-        has_runner = bool(str(stage.get("runner") or "").strip())
-        has_script = bool(str(stage.get("image") or "").strip()) or "run" in stage
         has_pipeline = bool(str(stage.get("pipeline") or "").strip())
+        has_runner = (
+            not has_pipeline and bool(str(stage.get("runner") or "").strip())
+        )
+        has_script = bool(str(stage.get("image") or "").strip()) or "run" in stage
         if sum((has_runner, has_script, has_pipeline)) != 1:
             raise ValueError(
                 f"{path}.stages.{stage_id} must define exactly one runner, "
@@ -293,7 +331,7 @@ def load_pipeline(path: Path) -> PipelineDefinition:
             runner_selector = str(stage["runner"]).strip()
             if (
                 runner_selector.startswith("${{")
-                and not PIPELINE_INPUT_REFERENCE_RE.fullmatch(runner_selector)
+                and not RUNNER_REFERENCE_RE.fullmatch(runner_selector)
             ):
                 raise ValueError(
                     f"{path}.stages.{stage_id}.runner contains unsupported "
@@ -319,16 +357,16 @@ def load_pipeline(path: Path) -> PipelineDefinition:
                     f"{path}.stages.{stage_id}.inputs.{role}",
                     pattern=INPUT_REFERENCE_RE,
                 )
-            parameters = stage.get("with") or {}
-            if not isinstance(parameters, dict):
+            job_parameters = stage.get("with") or {}
+            if not isinstance(job_parameters, dict):
                 raise ValueError(f"{path}.stages.{stage_id}.with must be a mapping")
             _validate_references(
-                parameters,
+                job_parameters,
                 f"{path}.stages.{stage_id}.with",
                 pattern=STATIC_REFERENCE_RE,
             )
             normalized["inputs"] = dict(inputs)
-            normalized["with"] = dict(parameters)
+            normalized["with"] = dict(job_parameters)
         elif has_pipeline:
             if "retention" in stage:
                 raise ValueError(
@@ -340,44 +378,40 @@ def load_pipeline(path: Path) -> PipelineDefinition:
                 raise ValueError(
                     f"{path}.stages.{stage_id}.pipeline must be a pipeline name"
                 )
-            overrides = stage.get("with") or {}
-            if not isinstance(overrides, dict):
-                raise ValueError(f"{path}.stages.{stage_id}.with must be a mapping")
-            unsupported_overrides = sorted(
-                set(overrides) - {"dataset", "runner", "matrix"}
+            parameter_overrides = _normalize_parameters(
+                stage.get("with"),
+                f"{path}.stages.{stage_id}.with",
             )
-            if unsupported_overrides:
-                raise ValueError(
-                    f"{path}.stages.{stage_id}.with contains unsupported fields: "
-                    + ", ".join(unsupported_overrides)
-                )
             for input_name in ("dataset", "runner"):
-                value = overrides.get(input_name)
+                value = stage.get(input_name)
                 if value is None:
                     continue
                 if not isinstance(value, str) or not value.strip():
                     raise ValueError(
-                        f"{path}.stages.{stage_id}.with.{input_name} must be a string"
+                        f"{path}.stages.{stage_id}.{input_name} must be a string"
                     )
                 _validate_references(
                     value,
-                    f"{path}.stages.{stage_id}.with.{input_name}",
+                    f"{path}.stages.{stage_id}.{input_name}",
                     pattern=STATIC_REFERENCE_RE,
                 )
             matrix_overrides = _normalize_matrix(
-                overrides.get("matrix"),
-                f"{path}.stages.{stage_id}.with.matrix",
+                stage.get("matrix"),
+                f"{path}.stages.{stage_id}.matrix",
             )
             _validate_references(
                 matrix_overrides,
-                f"{path}.stages.{stage_id}.with.matrix",
+                f"{path}.stages.{stage_id}.matrix",
+                pattern=STATIC_REFERENCE_RE,
+            )
+            _validate_references(
+                parameter_overrides,
+                f"{path}.stages.{stage_id}.with",
                 pattern=STATIC_REFERENCE_RE,
             )
             normalized["pipeline"] = pipeline_name
-            normalized["with"] = {
-                **overrides,
-                "matrix": dict(matrix_overrides),
-            }
+            normalized["matrix"] = dict(matrix_overrides)
+            normalized["with"] = dict(parameter_overrides)
         else:
             if not str(stage.get("image") or "").strip() or "run" not in stage:
                 raise ValueError(
@@ -430,6 +464,7 @@ def load_pipeline(path: Path) -> PipelineDefinition:
         "pipeline_version": 1,
         "name": name,
         **pipeline_inputs,
+        "parameters": parameters,
         "matrix": matrix,
         "stages": stages,
     }
@@ -437,6 +472,7 @@ def load_pipeline(path: Path) -> PipelineDefinition:
         name=name,
         path=path.resolve(),
         inputs=pipeline_inputs,
+        parameters=parameters,
         matrix=matrix,
         stages=stages,
         raw=normalized_raw,
@@ -475,6 +511,7 @@ def resolve_static_value(
     *,
     inputs: dict[str, str | None],
     lane: dict[str, Any],
+    parameters: dict[str, Any] | None = None,
 ) -> Any:
     match = STATIC_REFERENCE_RE.fullmatch(value) if isinstance(value, str) else None
     if match:
@@ -484,18 +521,34 @@ def resolve_static_value(
             if resolved in {None, ""}:
                 raise ValueError(f"pipeline input {reference!r} is not defined")
             return resolved
+        if reference.startswith("parameters."):
+            key = reference.removeprefix("parameters.")
+            available = parameters or {}
+            if key not in available:
+                raise ValueError(f"pipeline parameter {key!r} is not defined")
+            return available[key]
         key = reference.removeprefix("matrix.")
         if key not in lane:
             raise ValueError(f"matrix value {key!r} is not defined")
         return lane[key]
     if isinstance(value, list):
         return [
-            resolve_static_value(item, inputs=inputs, lane=lane)
+            resolve_static_value(
+                item,
+                inputs=inputs,
+                lane=lane,
+                parameters=parameters,
+            )
             for item in value
         ]
     if isinstance(value, dict):
         return {
-            key: resolve_static_value(item, inputs=inputs, lane=lane)
+            key: resolve_static_value(
+                item,
+                inputs=inputs,
+                lane=lane,
+                parameters=parameters,
+            )
             for key, item in value.items()
         }
     return value

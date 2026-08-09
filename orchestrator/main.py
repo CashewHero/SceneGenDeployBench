@@ -294,6 +294,14 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline_add.add_argument("--dataset", help="override the pipeline dataset")
     pipeline_add.add_argument("--runner", help="override the pipeline runner")
     pipeline_add.add_argument(
+        "--set",
+        action="append",
+        dest="settings",
+        default=[],
+        metavar="KEY=VALUE",
+        help="override a pipeline parameter; repeat for multiple values",
+    )
+    pipeline_add.add_argument(
         "--matrix",
         action="append",
         default=[],
@@ -1058,6 +1066,7 @@ def handle_pipeline_add(args: argparse.Namespace) -> int:
         name=args.pipeline_name,
         file_path=args.pipeline_file,
         input_overrides={"dataset": args.dataset, "runner": args.runner},
+        parameter_settings=args.settings,
         matrix_values=args.matrix,
         allow_start_outside_window=args.allow_outside_window,
     )

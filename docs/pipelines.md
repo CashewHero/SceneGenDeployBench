@@ -11,6 +11,8 @@ pipeline_version: 1
 name: test_pipeline
 dataset: example_set1/city
 runner: test_runner
+parameters:
+  reference_count: 10
 
 stages:
   copy:
@@ -24,6 +26,8 @@ stages:
     inputs:
       data: ${{ dataset }}
       candidate: ${{ stages.copy.outputs }}
+    with:
+      max_references: ${{ parameters.reference_count }}
 
   report:
     needs: evaluate
@@ -36,20 +40,21 @@ Each stage uses exactly one execution form:
 
 - `runner` selects a registered runner. `inputs` contains the `data`, `candidate`, and `references` roles; `with` contains job parameters.
 - `image` plus `run` executes a direct script container. `run` can be a shell string or an exact argument list.
-- `pipeline` starts a durable child pipeline run. `with` may override its `dataset`, `runner`, and declared `matrix` axes.
+- `pipeline` starts a durable child pipeline run. `dataset`, `runner`, and `matrix` override the corresponding child settings; `with` contains child pipeline parameters.
 
 ```yaml
 stages:
   child:
     pipeline: experiment_pipeline
+    dataset: ${{ dataset }}
+    runner: ${{ runner }}
+    matrix:
+      seed: [1]
     with:
-      dataset: ${{ dataset }}
-      runner: ${{ runner }}
-      matrix:
-        seed: [1]
+      reference_count: ${{ parameters.reference_count }}
 ```
 
-`dataset` and `runner` are registered pipeline inputs. Their top-level values are defaults that may be overridden with `--dataset` and `--runner`.
+`dataset` and `runner` are registered pipeline inputs. Their top-level values are defaults that may be overridden with `--dataset` and `--runner`. `parameters` holds reusable pipeline settings that may be overridden with repeatable `--set key=value`; a nested pipeline stage passes parameter overrides directly through `with`.
 
 One stage can produce several stage executions across matrix lanes and samples. A runner-backed execution links to one ordinary job; a script execution runs directly without creating a job. `scope: matrix` is the default and runs the stage once per matrix lane; `scope: pipeline` runs it once for the pipeline. A pipeline-scoped dependency feeds every matrix lane, while a pipeline-scoped stage depending on a matrix stage waits for all lanes.
 
@@ -80,6 +85,7 @@ Override declared axes from the CLI:
 ```bash
 deploybench pipeline add experiment \
   --dataset tartan-test-15 \
+  --set reference_count=20 \
   --matrix sigma_px=0,2,4 \
   --matrix seed=0,1
 ```
@@ -89,6 +95,7 @@ Supported expressions are:
 ```text
 ${{ dataset }}
 ${{ runner }}
+${{ parameters.<name> }}
 ${{ matrix.<name> }}
 ${{ stages.<stage>.outputs }}
 ```
@@ -101,7 +108,7 @@ A script receives `/workspace/pipeline.json`:
 
 ```json
 {
-  "pipeline": {"run_id": "...", "name": "...", "dataset": "...", "runner": "test_runner@0.1.0"},
+  "pipeline": {"run_id": "...", "name": "...", "dataset": "...", "runner": "test_runner@0.1.0", "parameters": {"reference_count": 20}},
   "stage": {"id": "report", "scope": "pipeline", "lane_index": null, "matrix": {}},
   "needs": {"evaluate": [{"sample": "...", "lane_index": 0, "matrix": {"sigma_px": 2}, "status": "completed", "result": {}}]}
 }

@@ -689,12 +689,16 @@ class StorageContractTests(unittest.TestCase):
         )
         self.assertEqual(data_types, ["image", "camera_pose"])
 
-    def test_scene_scale_must_be_positive_and_finite(self) -> None:
+    def test_scene_scale_must_be_nonzero_and_finite(self) -> None:
         self.assertEqual(
             db_storage.normalize_output_metadata({"scene_scale": 0.7}),
             {"scene_scale": 0.7},
         )
-        for value in (True, 0, -1, float("inf"), float("nan"), "0.7"):
+        self.assertEqual(
+            db_storage.normalize_output_metadata({"scene_scale": -0.7}),
+            {"scene_scale": -0.7},
+        )
+        for value in (True, 0, float("inf"), float("nan"), "0.7"):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(ValueError, "scene_scale"):
                     db_storage.normalize_output_metadata({"scene_scale": value})

@@ -37,6 +37,7 @@ from domain.pipelines import (
     load_pipeline,
     matrix_lanes,
     merge_pipeline_inputs,
+    merge_pipeline_parameters,
     resolve_static_value,
     resolve_pipeline_path,
 )
@@ -360,6 +361,11 @@ def _coerce_setting_value(key: str, value: Any, default: Any) -> Any:
         if not isinstance(parsed, dict):
             raise ValueError(f"--set {key} expects a JSON object")
         return parsed
+    if default is None:
+        try:
+            return json.loads(normalized)
+        except json.JSONDecodeError:
+            return raw_value
     return raw_value
 
 
@@ -1244,12 +1250,20 @@ def _validate_nested_stage(
         )
     )
     unknown_matrix = sorted(
-        set(dict(stage.get("with") or {}).get("matrix") or {}) - set(child.matrix)
+        set(dict(stage.get("matrix") or {})) - set(child.matrix)
     )
     if unknown_matrix:
         raise ValueError(
             f"nested pipeline {child.name!r} has no matrix keys: "
             + ", ".join(unknown_matrix)
+        )
+    unknown_parameters = sorted(
+        set(dict(stage.get("with") or {})) - set(child.parameters)
+    )
+    if unknown_parameters:
+        raise ValueError(
+            f"nested pipeline {child.name!r} has no parameters: "
+            + ", ".join(unknown_parameters)
         )
 
 
@@ -1267,6 +1281,7 @@ def validate_pipeline(
     )
     definition = load_pipeline(path)
     inputs = dict(definition.inputs)
+    parameters = dict(definition.parameters)
     if inputs["runner"]:
         inputs["runner"] = resolve_runner(config, inputs["runner"]).selector
     for stage in definition.stages.values():
@@ -1274,7 +1289,12 @@ def validate_pipeline(
         if runner_selector.startswith("${{"):
             try:
                 runner_selector = str(
-                    resolve_static_value(runner_selector, inputs=inputs, lane={})
+                    resolve_static_value(
+                        runner_selector,
+                        inputs=inputs,
+                        lane={},
+                        parameters=parameters,
+                    )
                 )
             except ValueError:
                 continue
@@ -1298,6 +1318,7 @@ def add_pipeline(
     name: str | None,
     file_path: str | None,
     input_overrides: dict[str, str | None],
+    parameter_settings: list[str] | None,
     matrix_values: list[str] | None,
     allow_start_outside_window: bool,
 ) -> dict[str, Any]:
@@ -1319,16 +1340,29 @@ def add_pipeline(
     inputs["dataset"] = dataset_target
     if inputs["runner"]:
         inputs["runner"] = resolve_runner(config, inputs["runner"]).selector
+    parameters = merge_pipeline_parameters(
+        definition.parameters,
+        parse_key_value_settings(parameter_settings, definition.parameters),
+    )
 
     stage_runners: list[RunnerDefinition] = []
     for stage in definition.stages.values():
         _validate_nested_stage(config, stage)
+        if stage.get("pipeline"):
+            continue
         raw_runner = str(stage.get("runner") or "").strip()
         if raw_runner:
             stage_runners.append(
                 resolve_runner(
                     config,
-                    str(resolve_static_value(raw_runner, inputs=inputs, lane={})),
+                    str(
+                        resolve_static_value(
+                            raw_runner,
+                            inputs=inputs,
+                            lane={},
+                            parameters=parameters,
+                        )
+                    ),
                 )
             )
 
@@ -1349,6 +1383,7 @@ def add_pipeline(
     config_payload = {
         **definition.raw,
         **inputs,
+        "parameters": parameters,
         "matrix": matrix,
     }
     lanes = matrix_lanes(matrix)

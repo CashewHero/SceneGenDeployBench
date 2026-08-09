@@ -15,6 +15,7 @@ from domain.pipelines import (
     load_pipeline,
     matrix_lanes,
     merge_pipeline_inputs,
+    merge_pipeline_parameters,
     resolve_pipeline_path,
     resolve_static_value,
     stage_dependencies,
@@ -98,6 +99,10 @@ def _pipeline_inputs(run: dict[str, Any]) -> dict[str, str | None]:
     inputs = merge_pipeline_inputs(dict(run.get("config_json") or {}))
     inputs["dataset"] = str(run["dataset_target"])
     return inputs
+
+
+def _pipeline_parameters(run: dict[str, Any]) -> dict[str, Any]:
+    return dict(dict(run.get("config_json") or {}).get("parameters") or {})
 
 
 def _pipeline_run_directory(run: dict[str, Any]) -> Path:
@@ -451,6 +456,7 @@ def _script_context(
             "run_id": str(run["pipeline_run_id"]),
             "name": str(run["pipeline_name"]),
             **_pipeline_inputs(run),
+            "parameters": _pipeline_parameters(run),
         },
         "stage": {
             "id": stage_id,
@@ -539,12 +545,14 @@ def _materialize_script_stage(
             list(raw_run or []),
             inputs=_pipeline_inputs(run),
             lane=lane,
+            parameters=_pipeline_parameters(run),
         )
         command = [str(item) for item in resolved_run]
     environment = resolve_static_value(
         dict(stage.get("env") or {}),
         inputs=_pipeline_inputs(run),
         lane=lane,
+        parameters=_pipeline_parameters(run),
     )
     access = stage.get("access") or []
     if isinstance(access, str):
@@ -655,6 +663,7 @@ def _materialize_runner_stage(
                 stage["runner"],
                 inputs=_pipeline_inputs(run),
                 lane=lane,
+                parameters=_pipeline_parameters(run),
             )
         ),
     )
@@ -665,6 +674,7 @@ def _materialize_runner_stage(
                 stage.get("with") or {},
                 inputs=_pipeline_inputs(run),
                 lane=lane,
+                parameters=_pipeline_parameters(run),
             )
         ),
     }
@@ -719,6 +729,7 @@ def _materialize_runner_stage(
         configured_inputs[primary_role],
         inputs=_pipeline_inputs(run),
         lane=lane,
+        parameters=_pipeline_parameters(run),
     )
     sources = _resolve_sources(
         config,
@@ -744,6 +755,7 @@ def _materialize_runner_stage(
                         configured_inputs[role],
                         inputs=_pipeline_inputs(run),
                         lane=lane,
+                        parameters=_pipeline_parameters(run),
                     )
                     for role in ("data", "candidate", "references")
                     if role in configured_inputs
@@ -810,25 +822,49 @@ def _child_pipeline_config(
             "nested pipeline cycle: " + " -> ".join([*ancestors, definition.name])
         )
 
-    overrides = dict(
-        resolve_static_value(
-            dict(stage.get("with") or {}),
+    input_overrides = {
+        name: resolve_static_value(
+            stage[name],
             inputs=_pipeline_inputs(run),
             lane=lane,
+            parameters=_pipeline_parameters(run),
         )
-    )
-    inputs = merge_pipeline_inputs(definition.inputs, overrides)
+        for name in ("dataset", "runner")
+        if name in stage
+    }
+    inputs = merge_pipeline_inputs(definition.inputs, input_overrides)
     dataset_target = str(inputs["dataset"] or "").strip()
     if not dataset_target:
         raise ValueError(
-            f"nested pipeline {definition.name!r} requires with.dataset or a default"
+            f"nested pipeline {definition.name!r} requires dataset or a default"
         )
     inputs["dataset"] = dataset_target
     if inputs["runner"]:
         inputs["runner"] = _runner(config, str(inputs["runner"])).selector
 
+    parameter_overrides = dict(
+        resolve_static_value(
+            dict(stage.get("with") or {}),
+            inputs=_pipeline_inputs(run),
+            lane=lane,
+            parameters=_pipeline_parameters(run),
+        )
+    )
+    parameters = merge_pipeline_parameters(
+        definition.parameters,
+        parameter_overrides,
+    )
+
     matrix = dict(definition.matrix)
-    for key, values in dict(overrides.get("matrix") or {}).items():
+    matrix_overrides = dict(
+        resolve_static_value(
+            dict(stage.get("matrix") or {}),
+            inputs=_pipeline_inputs(run),
+            lane=lane,
+            parameters=_pipeline_parameters(run),
+        )
+    )
+    for key, values in matrix_overrides.items():
         if key not in matrix:
             raise ValueError(
                 f"nested pipeline {definition.name!r} has no matrix key {key!r}"
@@ -837,6 +873,7 @@ def _child_pipeline_config(
     payload = {
         **definition.raw,
         **inputs,
+        "parameters": parameters,
         "matrix": matrix,
         "_pipeline_ancestors": ancestors,
     }
@@ -1267,6 +1304,7 @@ def reconcile_pipeline_run(
         name=str(run["pipeline_name"]),
         path=Path(str(run["config_path"])),
         inputs=_pipeline_inputs(run),
+        parameters=_pipeline_parameters(run),
         matrix=dict(run["config_json"].get("matrix") or {}),
         stages=dict(run["config_json"]["stages"]),
         raw=dict(run["config_json"]),
@@ -1288,10 +1326,10 @@ def reconcile_pipeline_run(
         stage_changed = False
         for lane_index, lane in _stage_execution_lanes(stage, lanes):
             materialize = (
-                _materialize_runner_stage
-                if stage.get("runner")
-                else _materialize_pipeline_stage
+                _materialize_pipeline_stage
                 if stage.get("pipeline")
+                else _materialize_runner_stage
+                if stage.get("runner")
                 else _materialize_script_stage
             )
             changed = materialize(

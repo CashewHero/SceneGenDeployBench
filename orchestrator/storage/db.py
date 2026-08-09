@@ -482,12 +482,12 @@ def normalize_output_metadata(value: Any) -> dict[str, Any]:
     raw_scale = metadata["scene_scale"]
     if isinstance(raw_scale, bool) or not isinstance(raw_scale, (int, float)):
         raise ValueError(
-            "output_metadata.scene_scale must be a positive finite number"
+            "output_metadata.scene_scale must be a nonzero finite number"
         )
     scene_scale = float(raw_scale)
-    if not math.isfinite(scene_scale) or scene_scale <= 0:
+    if not math.isfinite(scene_scale) or scene_scale == 0:
         raise ValueError(
-            "output_metadata.scene_scale must be a positive finite number"
+            "output_metadata.scene_scale must be a nonzero finite number"
         )
     metadata["scene_scale"] = scene_scale
     return metadata
