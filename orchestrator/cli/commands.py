@@ -33,6 +33,8 @@ from storage.db import (
     update_jobs_allow_outside_window,
 )
 from domain.pipelines import (
+    STAGE_OUTPUT_REFERENCE_RE,
+    STAGE_OUTPUT_VALUE_REFERENCE_RE,
     list_pipeline_definitions,
     load_pipeline,
     matrix_lanes,
@@ -1242,6 +1244,8 @@ def _validate_nested_stage(
     child_name = str(stage.get("pipeline") or "").strip()
     if not child_name:
         return
+    if child_name.startswith("${{"):
+        return
     child = load_pipeline(
         resolve_pipeline_path(
             config.catalogs.pipelines,
@@ -1249,16 +1253,22 @@ def _validate_nested_stage(
             file_path=None,
         )
     )
-    unknown_matrix = sorted(
-        set(dict(stage.get("matrix") or {})) - set(child.matrix)
+    raw_matrix = stage.get("matrix") or {}
+    unknown_matrix = (
+        []
+        if isinstance(raw_matrix, str)
+        else sorted(set(dict(raw_matrix)) - set(child.matrix))
     )
     if unknown_matrix:
         raise ValueError(
             f"nested pipeline {child.name!r} has no matrix keys: "
             + ", ".join(unknown_matrix)
         )
-    unknown_parameters = sorted(
-        set(dict(stage.get("with") or {})) - set(child.parameters)
+    raw_parameters = stage.get("with") or {}
+    unknown_parameters = (
+        []
+        if isinstance(raw_parameters, str)
+        else sorted(set(dict(raw_parameters)) - set(child.parameters))
     )
     if unknown_parameters:
         raise ValueError(
@@ -1286,6 +1296,11 @@ def validate_pipeline(
         inputs["runner"] = resolve_runner(config, inputs["runner"]).selector
     for stage in definition.stages.values():
         runner_selector = str(stage.get("runner") or "").strip()
+        if (
+            STAGE_OUTPUT_REFERENCE_RE.fullmatch(runner_selector)
+            or STAGE_OUTPUT_VALUE_REFERENCE_RE.fullmatch(runner_selector)
+        ):
+            runner_selector = ""
         if runner_selector.startswith("${{"):
             try:
                 runner_selector = str(
@@ -1351,20 +1366,22 @@ def add_pipeline(
         if stage.get("pipeline"):
             continue
         raw_runner = str(stage.get("runner") or "").strip()
+        if (
+            STAGE_OUTPUT_REFERENCE_RE.fullmatch(raw_runner)
+            or STAGE_OUTPUT_VALUE_REFERENCE_RE.fullmatch(raw_runner)
+        ):
+            continue
         if raw_runner:
-            stage_runners.append(
-                resolve_runner(
-                    config,
-                    str(
-                        resolve_static_value(
-                            raw_runner,
-                            inputs=inputs,
-                            lane={},
-                            parameters=parameters,
-                        )
-                    ),
+            try:
+                resolved_runner = resolve_static_value(
+                    raw_runner,
+                    inputs=inputs,
+                    lane={},
+                    parameters=parameters,
                 )
-            )
+            except ValueError:
+                continue
+            stage_runners.append(resolve_runner(config, str(resolved_runner)))
 
     has_dataset_downloader = any(
         stage_runner.kind == "dataset_downloader"
@@ -1375,7 +1392,14 @@ def add_pipeline(
     except (FileNotFoundError, ValueError):
         if not has_dataset_downloader:
             raise
-    matrix = dict(definition.matrix)
+    matrix = dict(
+        resolve_static_value(
+            definition.matrix,
+            inputs=inputs,
+            lane={},
+            parameters=parameters,
+        )
+    )
     for key, values in _matrix_overrides(matrix_values).items():
         if key not in matrix:
             raise ValueError(f"--matrix references undefined matrix key {key!r}")

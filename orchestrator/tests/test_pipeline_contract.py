@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from cli.commands import parse_key_value_settings
+from cli.commands import _validate_nested_stage, parse_key_value_settings
 from domain.pipelines import (
     load_pipeline,
     merge_pipeline_inputs,
@@ -18,6 +18,7 @@ from execution.pipelines import (
     _child_pipeline_config,
     _dependency_rows,
     _effective_retention,
+    _resolve_runtime_value,
     _script_context,
     _script_execution_directory,
     _stage_execution_lanes,
@@ -27,6 +28,34 @@ from execution.pipelines import (
 
 
 class PipelineContractTests(unittest.TestCase):
+    def test_cli_validation_accepts_dynamic_nested_matrix(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            catalog = Path(temp_dir)
+            (catalog / "child.yaml").write_text(
+                """
+                pipeline_version: 1
+                name: child
+                matrix:
+                  trajectory: [default]
+                stages:
+                  prepare:
+                    image: python:3
+                    run: [python, -c, pass]
+                """,
+                encoding="utf-8",
+            )
+            config = SimpleNamespace(
+                catalogs=SimpleNamespace(pipelines=catalog)
+            )
+
+            _validate_nested_stage(
+                config,
+                {
+                    "pipeline": "child",
+                    "matrix": "${{ stages.discover.outputs.matrix }}",
+                },
+            )
+
     def test_pipeline_runner_default_and_cli_override_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "runner-input.yaml"
@@ -138,6 +167,23 @@ class PipelineContractTests(unittest.TestCase):
             ),
             {"initial_scene_scale_overwrite": -0.7},
         )
+        self.assertEqual(
+            resolve_static_value(
+                "${{ parameters.settings.reference_count }}",
+                inputs=definition.inputs,
+                lane={},
+                parameters={"settings": {"reference_count": 12}},
+            ),
+            12,
+        )
+        self.assertEqual(
+            resolve_static_value(
+                "${{ matrix.case.dataset }}",
+                inputs=definition.inputs,
+                lane={"case": {"dataset": "nested-data"}},
+            ),
+            "nested-data",
+        )
 
     def test_nested_pipeline_stage_uses_with_and_rejects_retention(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -248,6 +294,204 @@ class PipelineContractTests(unittest.TestCase):
         self.assertEqual(payload["matrix"], {"seed": [2]})
         self.assertEqual(lanes, [{"seed": 2}])
 
+    def test_nested_pipeline_stage_uses_dynamic_matrix_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            catalog = Path(temp_dir)
+            child_path = catalog / "child.yaml"
+            child_path.write_text(
+                """
+                pipeline_version: 1
+                name: child
+                dataset: child-data
+                runner: child-runner
+                matrix:
+                  trajectory: ["${{ dataset }}"]
+                  profile: [default]
+                stages:
+                  prepare:
+                    image: python:3
+                    run: [python, -c, pass]
+                    env:
+                      DATASET_TARGET: ${{ matrix.trajectory }}
+                """,
+                encoding="utf-8",
+            )
+            stage = {
+                "pipeline": "child",
+                "dataset": "${{ dataset }}",
+                "runner": "${{ runner }}",
+                "needs": ["discover"],
+                "matrix": "${{ stages.discover.outputs.other }}",
+                "with": {},
+            }
+            run = {
+                "pipeline_name": "parent",
+                "dataset_target": "parent-data",
+                "config_json": {
+                    "dataset": "parent-data",
+                    "runner": "parent-runner@0.1.0",
+                    "parameters": {},
+                },
+            }
+            stages = {
+                "discover": {"scope": "pipeline"},
+                "child": stage,
+            }
+            rows = [
+                {
+                    "stage_id": "discover",
+                    "lane_index": 0,
+                    "status": "completed",
+                    "result_json": {
+                        "other": {
+                            "trajectory": ["data/one", "data/two"]
+                        }
+                    },
+                }
+            ]
+            config = SimpleNamespace(
+                catalogs=SimpleNamespace(pipelines=catalog),
+            )
+            with patch(
+                "execution.pipelines._runner",
+                return_value=SimpleNamespace(selector="parent-runner@0.1.0"),
+            ):
+                _, dataset, payload, lanes = _child_pipeline_config(
+                    config,
+                    run=run,
+                    stage=stage,
+                    lane={},
+                    stages=stages,
+                    stage_rows=rows,
+                )
+                partial_stage = {
+                    **stage,
+                    "matrix": {
+                        "trajectory": (
+                            "${{ stages.discover.outputs.other.trajectory }}"
+                        )
+                    },
+                }
+                stages["child"] = partial_stage
+                _, _, partial_payload, partial_lanes = _child_pipeline_config(
+                    config,
+                    run=run,
+                    stage=partial_stage,
+                    lane={},
+                    stages=stages,
+                    stage_rows=rows,
+                )
+
+        self.assertEqual(dataset, "parent-data")
+        self.assertEqual(
+            payload["matrix"],
+            {"trajectory": ["data/one", "data/two"]},
+        )
+        self.assertEqual(
+            lanes,
+            [
+                {"trajectory": "data/one"},
+                {"trajectory": "data/two"},
+            ],
+        )
+        self.assertEqual(
+            partial_payload["matrix"],
+            {
+                "trajectory": ["data/one", "data/two"],
+                "profile": ["default"],
+            },
+        )
+        self.assertEqual(
+            partial_lanes,
+            [
+                {"trajectory": "data/one", "profile": "default"},
+                {"trajectory": "data/two", "profile": "default"},
+            ],
+        )
+
+    def test_stage_output_expressions_are_general_runtime_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "parent.yaml"
+            path.write_text(
+                """
+                pipeline_version: 1
+                name: parent
+                dataset: test-data
+                stages:
+                  discover:
+                    image: python:3
+                    run: [python, -c, pass]
+                  consume:
+                    needs: discover
+                    runner: ${{ stages.discover.outputs.config.runner }}
+                    inputs: ${{ stages.discover.outputs.config.inputs }}
+                    with: ${{ stages.discover.outputs.config.parameters }}
+                """,
+                encoding="utf-8",
+            )
+
+            definition = load_pipeline(path)
+
+        stage = definition.stages["consume"]
+        rows = [
+            {
+                "stage_id": "discover",
+                "lane_index": 2,
+                "result_json": {
+                    "config": {
+                        "runner": "test_runner@0.1.0",
+                        "inputs": {"data": "test-data/frame"},
+                        "parameters": {"count": 4},
+                    }
+                },
+            }
+        ]
+        common = {
+            "inputs": {"dataset": "test-data", "runner": None},
+            "lane": {},
+            "parameters": {},
+            "stage": stage,
+            "stages": definition.stages,
+            "lane_index": 2,
+            "stage_rows": rows,
+        }
+        self.assertEqual(
+            _resolve_runtime_value(stage["runner"], **common),
+            "test_runner@0.1.0",
+        )
+        self.assertEqual(
+            _resolve_runtime_value(stage["inputs"], **common),
+            {"data": "test-data/frame"},
+        )
+        self.assertEqual(
+            _resolve_runtime_value(
+                "${{ stages.discover.outputs }}", **common
+            ),
+            rows[0]["result_json"],
+        )
+
+    def test_stage_output_expression_requires_declared_dependency(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "missing-needs.yaml"
+            path.write_text(
+                """
+                pipeline_version: 1
+                name: missing_needs
+                stages:
+                  discover:
+                    image: python:3
+                    run: [python, -c, pass]
+                  consume:
+                    runner: test_runner
+                    with:
+                      count: ${{ stages.discover.outputs.count }}
+                """,
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "must be listed in needs"):
+                load_pipeline(path)
+
     def test_runner_stage_may_have_empty_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "download.yaml"
@@ -355,6 +599,7 @@ class PipelineContractTests(unittest.TestCase):
                     "external_key": "__script__",
                     "sample_id": "__script__",
                     "job_id": None,
+                    "sample_metadata_json": {"pose_coordinate_system": "NED"},
                     "result_json": {
                         "output_files": {
                             "sample-a": {"image": "/data/pipelines/a.png"},
@@ -380,6 +625,27 @@ class PipelineContractTests(unittest.TestCase):
             [source.output_metadata for source in sources],
             [{"scene_scale": 0.7}, {"scene_scale": 0.7}],
         )
+        self.assertEqual(
+            [source.identity["metadata_json"] for source in sources],
+            [
+                {"pose_coordinate_system": "NED"},
+                {"pose_coordinate_system": "NED"},
+            ],
+        )
+
+    def test_stage_output_sources_only_use_output_files(self) -> None:
+        sources = _stage_output_sources(
+            [
+                {
+                    "status": "completed",
+                    "result_json": {
+                        "target": "example/trajectory/frame_000010"
+                    },
+                }
+            ],
+        )
+
+        self.assertEqual(sources, [])
 
     def test_script_context_includes_dependency_matrix(self) -> None:
         context = _script_context(

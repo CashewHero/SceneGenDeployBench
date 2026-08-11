@@ -136,6 +136,7 @@ def fetch_pipeline_stage_executions(
                   stage.stage_id, stage.lane_index, stage.lane_json,
                   stage.dataset_name, stage.dataset_version,
                   stage.external_key, stage.sample_id, stage.job_id,
+                  job.sample_metadata_json,
                   COALESCE(job.status, stage.status) AS status,
                   COALESCE(job.result_json, stage.result_json) AS result_json,
                   job.output_dir,

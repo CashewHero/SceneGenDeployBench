@@ -11,7 +11,9 @@ from typing import Any
 from app.config import OrchestratorConfig, RunnerDefinition
 from domain.pipelines import (
     STAGE_OUTPUT_REFERENCE_RE,
+    STAGE_OUTPUT_VALUE_REFERENCE_RE,
     PipelineDefinition,
+    _normalize_matrix,
     load_pipeline,
     matrix_lanes,
     merge_pipeline_inputs,
@@ -191,7 +193,9 @@ def _stage_rows(
     ]
 
 
-def _stage_output_sources(rows: list[dict[str, Any]]) -> list[SourceItem]:
+def _stage_output_sources(
+    rows: list[dict[str, Any]],
+) -> list[SourceItem]:
     sources: list[SourceItem] = []
     for row in rows:
         if row["status"] != "completed":
@@ -216,7 +220,7 @@ def _stage_output_sources(rows: list[dict[str, Any]]) -> list[SourceItem]:
                 "external_key": external_key,
                 "subset_key": "",
                 "sample_id": sample_id,
-                "metadata_json": {},
+                "metadata_json": dict(row.get("sample_metadata_json") or {}),
             }
             sources.append(
                 SourceItem(
@@ -231,6 +235,109 @@ def _stage_output_sources(rows: list[dict[str, Any]]) -> list[SourceItem]:
     return sources
 
 
+def _resolve_runtime_value(
+    value: Any,
+    *,
+    inputs: dict[str, str | None],
+    lane: dict[str, Any],
+    parameters: dict[str, Any],
+    stage: dict[str, Any],
+    stages: dict[str, dict[str, Any]],
+    lane_index: int,
+    stage_rows: list[dict[str, Any]],
+) -> Any:
+    """Resolve an exact pipeline expression while preserving its JSON type."""
+    if isinstance(value, str):
+        output_match = STAGE_OUTPUT_VALUE_REFERENCE_RE.fullmatch(value)
+        source_match = STAGE_OUTPUT_REFERENCE_RE.fullmatch(value)
+        match = output_match or source_match
+        if match:
+            dependency = match.group(1)
+            rows = _stage_rows(
+                stage_rows,
+                stage_id=dependency,
+                lane_index=_dependency_lane_index(
+                    stage=stage,
+                    dependency=stages[dependency],
+                    lane_index=lane_index,
+                ),
+            )
+            if not rows:
+                raise ValueError(
+                    f"stage output {dependency!r} has no applicable execution"
+                )
+            output_path = output_match.group(2) if output_match else None
+            resolved: list[Any] = []
+            for row in rows:
+                item: Any = dict(row.get("result_json") or {})
+                for key in output_path.split(".") if output_path else ():
+                    if not isinstance(item, dict) or key not in item:
+                        suffix = f".{output_path}" if output_path else ""
+                        raise ValueError(
+                            f"stage output {dependency!r}{suffix} is not defined"
+                        )
+                    item = item[key]
+                resolved.append(item)
+            return resolved[0] if len(resolved) == 1 else resolved
+        return resolve_static_value(
+            value,
+            inputs=inputs,
+            lane=lane,
+            parameters=parameters,
+        )
+    if isinstance(value, list):
+        return [
+            _resolve_runtime_value(
+                item,
+                inputs=inputs,
+                lane=lane,
+                parameters=parameters,
+                stage=stage,
+                stages=stages,
+                lane_index=lane_index,
+                stage_rows=stage_rows,
+            )
+            for item in value
+        ]
+    if isinstance(value, dict):
+        return {
+            key: _resolve_runtime_value(
+                item,
+                inputs=inputs,
+                lane=lane,
+                parameters=parameters,
+                stage=stage,
+                stages=stages,
+                lane_index=lane_index,
+                stage_rows=stage_rows,
+            )
+            for key, item in value.items()
+        }
+    return value
+
+
+def _resolve_stage_value(
+    value: Any,
+    *,
+    run: dict[str, Any],
+    stage: dict[str, Any],
+    stages: dict[str, dict[str, Any]],
+    lane_index: int,
+    lane: dict[str, Any],
+    stage_rows: list[dict[str, Any]],
+) -> Any:
+    return _resolve_runtime_value(
+        value,
+        inputs=_pipeline_inputs(run),
+        lane=lane,
+        parameters=_pipeline_parameters(run),
+        stage=stage,
+        stages=stages,
+        lane_index=lane_index,
+        stage_rows=stage_rows,
+    )
+
+
 def _resolve_sources(
     config: OrchestratorConfig,
     *,
@@ -241,6 +348,21 @@ def _resolve_sources(
     lane_index: int,
     stage_rows: list[dict[str, Any]],
 ) -> list[SourceItem]:
+    if isinstance(expression, list):
+        sources: list[SourceItem] = []
+        for item in expression:
+            sources.extend(
+                _resolve_sources(
+                    config,
+                    expression=item,
+                    dataset=dataset,
+                    stage=stage,
+                    stages=stages,
+                    lane_index=lane_index,
+                    stage_rows=stage_rows,
+                )
+            )
+        return sources
     if isinstance(expression, str) and not expression.lstrip().startswith("${{"):
         return _target_sources(config, expression)
     if not isinstance(expression, str):
@@ -537,29 +659,72 @@ def _materialize_script_stage(
         lane=lane,
         dependencies=dependencies,
     )
-    raw_run = stage.get("run")
-    if isinstance(raw_run, str):
-        command = ["sh", "-lc", raw_run]
-    else:
-        resolved_run = resolve_static_value(
-            list(raw_run or []),
-            inputs=_pipeline_inputs(run),
-            lane=lane,
-            parameters=_pipeline_parameters(run),
-        )
-        command = [str(item) for item in resolved_run]
-    environment = resolve_static_value(
-        dict(stage.get("env") or {}),
-        inputs=_pipeline_inputs(run),
+    resolved_run = _resolve_stage_value(
+        stage.get("run"),
+        run=run,
+        stage=stage,
+        stages=stages,
+        lane_index=lane_index,
         lane=lane,
-        parameters=_pipeline_parameters(run),
+        stage_rows=all_rows,
     )
-    access = stage.get("access") or []
+    if isinstance(resolved_run, str):
+        command = ["sh", "-lc", resolved_run]
+    else:
+        if not isinstance(resolved_run, list) or not resolved_run:
+            raise ValueError(f"script stage {stage_id!r} run must resolve to a command")
+        command = [str(item) for item in resolved_run]
+    environment = _resolve_stage_value(
+        stage.get("env") or {},
+        run=run,
+        stage=stage,
+        stages=stages,
+        lane_index=lane_index,
+        lane=lane,
+        stage_rows=all_rows,
+    )
+    if not isinstance(environment, dict):
+        raise ValueError(f"script stage {stage_id!r} env must resolve to a mapping")
+    access = _resolve_stage_value(
+        stage.get("access") or [],
+        run=run,
+        stage=stage,
+        stages=stages,
+        lane_index=lane_index,
+        lane=lane,
+        stage_rows=all_rows,
+    )
     if isinstance(access, str):
         access = [access]
-    mounts = stage.get("mounts") or []
+    mounts = _resolve_stage_value(
+        stage.get("mounts") or [],
+        run=run,
+        stage=stage,
+        stages=stages,
+        lane_index=lane_index,
+        lane=lane,
+        stage_rows=all_rows,
+    )
     if isinstance(mounts, str):
         mounts = [mounts]
+    image = _resolve_stage_value(
+        stage["image"],
+        run=run,
+        stage=stage,
+        stages=stages,
+        lane_index=lane_index,
+        lane=lane,
+        stage_rows=all_rows,
+    )
+    workdir = _resolve_stage_value(
+        stage.get("workdir") or "/workspace",
+        run=run,
+        stage=stage,
+        stages=stages,
+        lane_index=lane_index,
+        lane=lane,
+        stage_rows=all_rows,
+    )
 
     exit_code = 1
     script_result: dict[str, Any] = {}
@@ -567,7 +732,7 @@ def _materialize_script_stage(
     try:
         execution_result = run_script_container(
             config,
-            image=str(stage["image"]),
+            image=str(image),
             script_path=None,
             command=command,
             access_values=[str(value) for value in access],
@@ -575,7 +740,7 @@ def _materialize_script_stage(
                 f"{key}={value}" for key, value in environment.items()
             ],
             mount_values=[str(value) for value in mounts],
-            workdir=str(stage.get("workdir") or "/workspace"),
+            workdir=str(workdir),
             workspace_files={
                 "pipeline.json": json.dumps(context, indent=2) + "\n",
             },
@@ -659,24 +824,31 @@ def _materialize_runner_stage(
     runner = _runner(
         config,
         str(
-            resolve_static_value(
+            _resolve_stage_value(
                 stage["runner"],
-                inputs=_pipeline_inputs(run),
+                run=run,
+                stage=stage,
+                stages=stages,
+                lane_index=lane_index,
                 lane=lane,
-                parameters=_pipeline_parameters(run),
+                stage_rows=all_rows,
             )
         ),
     )
+    resolved_parameters = _resolve_stage_value(
+        stage.get("with") or {},
+        run=run,
+        stage=stage,
+        stages=stages,
+        lane_index=lane_index,
+        lane=lane,
+        stage_rows=all_rows,
+    )
+    if not isinstance(resolved_parameters, dict):
+        raise ValueError(f"runner stage {stage_id!r} with must resolve to a mapping")
     parameters = {
         **runner.job_parameters,
-        **dict(
-            resolve_static_value(
-                stage.get("with") or {},
-                inputs=_pipeline_inputs(run),
-                lane=lane,
-                parameters=_pipeline_parameters(run),
-            )
-        ),
+        **resolved_parameters,
     }
     existing = {
         str(row["external_key"])
@@ -718,19 +890,52 @@ def _materialize_runner_stage(
         )
         return job_id is not None
 
-    configured_inputs = dict(stage.get("inputs") or {})
+    raw_inputs = stage.get("inputs") or {}
+    if isinstance(raw_inputs, dict):
+        configured_inputs = {
+            role: (
+                expression
+                if isinstance(expression, str)
+                and STAGE_OUTPUT_REFERENCE_RE.fullmatch(expression)
+                else _resolve_stage_value(
+                    expression,
+                    run=run,
+                    stage=stage,
+                    stages=stages,
+                    lane_index=lane_index,
+                    lane=lane,
+                    stage_rows=all_rows,
+                )
+            )
+            for role, expression in raw_inputs.items()
+        }
+    else:
+        configured_inputs = _resolve_stage_value(
+            raw_inputs,
+            run=run,
+            stage=stage,
+            stages=stages,
+            lane_index=lane_index,
+            lane=lane,
+            stage_rows=all_rows,
+        )
+    if not isinstance(configured_inputs, dict):
+        raise ValueError(f"runner stage {stage_id!r} inputs must resolve to a mapping")
+    invalid_roles = sorted(
+        set(configured_inputs) - {"data", "candidate", "references"}
+    )
+    if invalid_roles:
+        raise ValueError(
+            f"runner stage {stage_id!r} inputs has unsupported roles: "
+            + ", ".join(invalid_roles)
+        )
     primary_role = "candidate" if "candidate" in configured_inputs else "data"
     if primary_role not in configured_inputs:
         raise ValueError(
             f"runner stage {stage_id!r} using {runner.selector} requires "
             "inputs.data or inputs.candidate"
         )
-    primary_expression = resolve_static_value(
-        configured_inputs[primary_role],
-        inputs=_pipeline_inputs(run),
-        lane=lane,
-        parameters=_pipeline_parameters(run),
-    )
+    primary_expression = configured_inputs[primary_role]
     sources = _resolve_sources(
         config,
         expression=primary_expression,
@@ -751,12 +956,7 @@ def _materialize_runner_stage(
             stage={
                 **stage,
                 "inputs": {
-                    role: resolve_static_value(
-                        configured_inputs[role],
-                        inputs=_pipeline_inputs(run),
-                        lane=lane,
-                        parameters=_pipeline_parameters(run),
-                    )
+                    role: configured_inputs[role]
                     for role in ("data", "candidate", "references")
                     if role in configured_inputs
                 },
@@ -806,10 +1006,24 @@ def _child_pipeline_config(
     run: dict[str, Any],
     stage: dict[str, Any],
     lane: dict[str, Any],
+    stages: dict[str, dict[str, Any]] | None = None,
+    lane_index: int = PIPELINE_LANE_INDEX,
+    stage_rows: list[dict[str, Any]] | None = None,
 ) -> tuple[PipelineDefinition, str, dict[str, Any], list[dict[str, Any]]]:
+    available_stages = stages or {}
+    available_rows = stage_rows or []
+    pipeline_name = _resolve_stage_value(
+        stage["pipeline"],
+        run=run,
+        stage=stage,
+        stages=available_stages,
+        lane_index=lane_index,
+        lane=lane,
+        stage_rows=available_rows,
+    )
     path = resolve_pipeline_path(
         config.catalogs.pipelines,
-        name=str(stage["pipeline"]),
+        name=str(pipeline_name),
         file_path=None,
     )
     definition = load_pipeline(path)
@@ -823,11 +1037,14 @@ def _child_pipeline_config(
         )
 
     input_overrides = {
-        name: resolve_static_value(
+        name: _resolve_stage_value(
             stage[name],
-            inputs=_pipeline_inputs(run),
+            run=run,
+            stage=stage,
+            stages=available_stages,
+            lane_index=lane_index,
             lane=lane,
-            parameters=_pipeline_parameters(run),
+            stage_rows=available_rows,
         )
         for name in ("dataset", "runner")
         if name in stage
@@ -842,30 +1059,75 @@ def _child_pipeline_config(
     if inputs["runner"]:
         inputs["runner"] = _runner(config, str(inputs["runner"])).selector
 
-    parameter_overrides = dict(
-        resolve_static_value(
-            dict(stage.get("with") or {}),
-            inputs=_pipeline_inputs(run),
-            lane=lane,
-            parameters=_pipeline_parameters(run),
-        )
+    parameter_overrides = _resolve_stage_value(
+        stage.get("with") or {},
+        run=run,
+        stage=stage,
+        stages=available_stages,
+        lane_index=lane_index,
+        lane=lane,
+        stage_rows=available_rows,
     )
+    if not isinstance(parameter_overrides, dict):
+        raise ValueError(
+            f"nested pipeline {definition.name!r} with must resolve to a mapping"
+        )
     parameters = merge_pipeline_parameters(
         definition.parameters,
         parameter_overrides,
     )
 
-    matrix = dict(definition.matrix)
-    matrix_overrides = dict(
+    matrix = dict(
         resolve_static_value(
-            dict(stage.get("matrix") or {}),
-            inputs=_pipeline_inputs(run),
+            definition.matrix,
+            inputs=inputs,
             lane=lane,
-            parameters=_pipeline_parameters(run),
+            parameters=parameters,
         )
     )
+    declared_matrix_keys = set(matrix)
+    raw_matrix_overrides = stage.get("matrix") or {}
+
+    if isinstance(raw_matrix_overrides, str):
+        matrix_result = _resolve_stage_value(
+            raw_matrix_overrides,
+            run=run,
+            stage=stage,
+            stages=available_stages,
+            lane_index=lane_index,
+            lane=lane,
+            stage_rows=available_rows,
+        )
+        if not isinstance(matrix_result, dict) or not matrix_result:
+            raise ValueError(
+                f"nested pipeline {definition.name!r} matrix must resolve to "
+                "a nonempty mapping"
+            )
+        matrix_overrides = _normalize_matrix(
+            matrix_result,
+            f"nested pipeline {definition.name!r} matrix",
+        )
+        matrix = {}
+    else:
+        matrix_overrides: dict[str, list[Any]] = {}
+        for key, raw_values in dict(raw_matrix_overrides).items():
+            values = _resolve_stage_value(
+                raw_values,
+                run=run,
+                stage=stage,
+                stages=available_stages,
+                lane_index=lane_index,
+                lane=lane,
+                stage_rows=available_rows,
+            )
+            if not isinstance(values, list) or not values:
+                raise ValueError(
+                    f"nested pipeline {definition.name!r} matrix axis {key!r} "
+                    "must resolve to a nonempty list"
+                )
+            matrix_overrides[str(key)] = list(values)
     for key, values in matrix_overrides.items():
-        if key not in matrix:
+        if key not in declared_matrix_keys:
             raise ValueError(
                 f"nested pipeline {definition.name!r} has no matrix key {key!r}"
             )
@@ -947,6 +1209,9 @@ def _materialize_pipeline_stage(
                 run=run,
                 stage=stage,
                 lane=lane,
+                stages=stages,
+                lane_index=lane_index,
+                stage_rows=all_rows,
             )
             create_pipeline_run(
                 config,
@@ -996,6 +1261,9 @@ def _materialize_pipeline_stage(
         run=run,
         stage=stage,
         lane=lane,
+        stages=stages,
+        lane_index=lane_index,
+        stage_rows=all_rows,
     )
     child_id = generated_identifier("pipeline")
     created = insert_pipeline_stage_execution(
