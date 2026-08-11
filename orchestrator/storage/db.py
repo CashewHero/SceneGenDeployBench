@@ -1609,6 +1609,14 @@ def insert_jobs(
     reference_candidates = _reference_candidates(config, references)
 
     primary_rows = candidate_rows if candidate_target else data_rows
+    explicit_data_override = (
+        data_rows[0]
+        if dataset_target
+        and candidate_target
+        and len(data_rows) == 1
+        and len(candidate_rows) == 1
+        else None
+    )
     data_rows_by_identity: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     for row in data_rows:
         data_rows_by_identity.setdefault(_sample_identity(row), []).append(row)
@@ -1620,22 +1628,28 @@ def insert_jobs(
             for sample_row in primary_rows:
                 data_row = sample_row
                 if dataset_target and candidate_target:
-                    matching_data_rows = data_rows_by_identity.get(_sample_identity(sample_row), [])
-                    if not matching_data_rows:
-                        raise ValueError(
-                            f"--dataset has no sample matching --candidate "
-                            f"{sample_row['external_key']!r}"
+                    if explicit_data_override is not None:
+                        data_row = explicit_data_override
+                    else:
+                        matching_data_rows = data_rows_by_identity.get(
+                            _sample_identity(sample_row), []
                         )
-                    if len(matching_data_rows) > 1:
-                        raise ValueError(
-                            f"--dataset matches multiple outputs for candidate "
-                            f"{sample_row['external_key']!r}; select a narrower output target"
-                        )
-                    data_row = matching_data_rows[0]
+                        if not matching_data_rows:
+                            raise ValueError(
+                                f"--dataset has no sample matching --candidate "
+                                f"{sample_row['external_key']!r}; select one dataset "
+                                "sample and one candidate to override explicitly"
+                            )
+                        if len(matching_data_rows) > 1:
+                            raise ValueError(
+                                f"--dataset matches multiple outputs for candidate "
+                                f"{sample_row['external_key']!r}; select a narrower output target"
+                            )
+                        data_row = matching_data_rows[0]
 
                 sample_inputs = dict(sample_row["inputs_json"] or {})
                 sample_key = _sample_key(sample_row)
-                sample_metadata = dict(sample_row["metadata_json"] or {})
+                sample_metadata = dict(data_row["metadata_json"] or {})
                 upstream_row = (
                     sample_row
                     if candidate_from_output
@@ -1664,7 +1678,7 @@ def insert_jobs(
                     data_source,
                     required_datatypes=data_required,
                     optional_datatypes=data_optional,
-                    field_name=f"data sample {sample_row['external_key']!r}",
+                    field_name=f"data sample {data_row['external_key']!r}",
                 )
 
                 selected_candidates: dict[str, dict[str, Any]] = {}
@@ -1701,11 +1715,7 @@ def insert_jobs(
                         )
 
                 selected_references: dict[str, dict[str, Any]] = {}
-                primary_identity = (
-                    str(sample_row["dataset_name"]),
-                    str(sample_row["dataset_version"]),
-                    str(sample_row["external_key"]),
-                )
+                primary_identity = _sample_identity(data_row)
                 for candidate in reference_candidates:
                     candidate_identity = (
                         candidate["dataset_name"],
@@ -2045,16 +2055,16 @@ def fetch_output_sample_rows(config: OrchestratorConfig, *, dataset: str) -> lis
                   output_samples.external_key,
                   output_samples.sample_id,
                   output_samples.subset_key,
-                  COALESCE(
-                    jsonb_extract_path(
-                      producer_jobs.request_json,
-                      'inputs',
-                      'data',
-                      output_samples.sample_id
-                    ),
-                    samples.inputs_json,
-                    '{{}}'::jsonb
-                  ) AS inputs_json,
+                  COALESCE(samples.inputs_json, '{{}}'::jsonb)
+                  || COALESCE(
+                       jsonb_extract_path(
+                         producer_jobs.request_json,
+                         'inputs',
+                         'data',
+                         output_samples.sample_id
+                       ),
+                       '{{}}'::jsonb
+                     ) AS inputs_json,
                   COALESCE(
                     samples.dataset_data_types_json,
                     '[]'::jsonb

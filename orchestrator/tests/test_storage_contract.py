@@ -345,6 +345,102 @@ class StorageContractTests(unittest.TestCase):
         )
         self.assertEqual(db_storage.RECENT_BATCH_RUNNER_HISTORY_SIZE, 5)
 
+    def test_output_samples_merge_dataset_and_producer_inputs(self) -> None:
+        config = load_config(str(self.config_path))
+        cursor = Mock()
+        cursor.fetchall.return_value = []
+        connection = Mock()
+        connection.cursor.return_value = nullcontext(cursor)
+        with patch.object(
+            db_storage,
+            "connect_database",
+            return_value=nullcontext(connection),
+        ):
+            db_storage.fetch_output_sample_rows(
+                config,
+                dataset="output/test_runner@0.1.0/example_set1",
+            )
+
+        query = cursor.execute.call_args.args[0]
+        self.assertIn(
+            "COALESCE(samples.inputs_json, '{}'::jsonb)",
+            query,
+        )
+        self.assertIn("|| COALESCE(", query)
+        self.assertIn("producer_jobs.request_json", query)
+
+    def test_explicit_dataset_overrides_different_candidate_input(self) -> None:
+        config = load_config(str(self.config_path))
+        runner = config.runners["test_runner@0.1.0"]
+        data_row = {
+            "dataset_name": "override-set",
+            "dataset_version": "1",
+            "external_key": "override/sample-1",
+            "sample_id": "sample-1",
+            "subset_key": "override",
+            "inputs_json": {"image": "/data/override.png"},
+            "metadata_json": {"source": "override"},
+        }
+        candidate_row = {
+            "dataset_name": "candidate-set",
+            "dataset_version": "1",
+            "external_key": "candidate/sample-1",
+            "sample_id": "sample-1",
+            "subset_key": "candidate",
+            "inputs_json": {"image": "/data/original.png"},
+            "metadata_json": {"source": "original"},
+            "outputs_json": {"sample-1": {"scene": "/output/scene.bin"}},
+            "output_metadata_json": {},
+            "source_job_id": "job-generator",
+        }
+        cursor = Mock()
+        connection = Mock()
+        connection.cursor.return_value = nullcontext(cursor)
+        with (
+            patch.object(db_storage, "sync_runner_state"),
+            patch.object(
+                db_storage,
+                "_target_sample_rows",
+                side_effect=[
+                    (False, "override-set", [data_row]),
+                    (True, "candidate-set", [candidate_row]),
+                ],
+            ),
+            patch.object(
+                db_storage,
+                "connect_database",
+                return_value=nullcontext(connection),
+            ),
+            patch.object(db_storage, "generated_identifier", return_value="job-1"),
+            patch.object(db_storage, "insert_resolved_job_row") as insert_job,
+        ):
+            db_storage.insert_jobs(
+                config,
+                dataset="override-set/override/sample-1",
+                candidate="output/test_runner@0.1.0/candidate-set/candidate/sample-1",
+                references=[],
+                runner=runner,
+                job_type="evaluation",
+                parameters={},
+                timeout_seconds=60,
+                source_job_id=None,
+                allow_start_outside_window=False,
+            )
+
+        kwargs = insert_job.call_args.kwargs
+        self.assertEqual(
+            kwargs["inputs"],
+            {
+                "data": {"sample-1": {"image": "/data/override.png"}},
+                "candidate": {"sample-1": {"scene": "/output/scene.bin"}},
+            },
+        )
+        self.assertEqual(
+            kwargs["identity"]["metadata_json"],
+            {"source": "override"},
+        )
+        self.assertEqual(kwargs["source_job_id"], "job-generator")
+
     def test_claim_candidates_prefer_other_then_least_recent_runner(
         self,
     ) -> None:
