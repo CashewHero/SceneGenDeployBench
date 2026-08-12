@@ -130,6 +130,7 @@ metadata:
   depth:
     format: png
     encoding: float32_le_bgra
+    representation: ray_distance
     units: meters
 ```
 
