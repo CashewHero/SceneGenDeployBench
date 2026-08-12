@@ -127,7 +127,13 @@ metadata:
   pose_units: meters
   resolution: [2560, 1280]
   fov: [360, 180]
+  depth:
+    format: png
+    encoding: float32_le_bgra
+    units: meters
 ```
+
+See [Depth Inputs](../runner_wrapper/docs/depth.md) for the depth convention and supported encodings.
 
 `camera_pose` is frame-specific. It may be inline YAML or a YAML/JSON path, and is passed as normalized JSON. See [Camera Pose Inputs](../runner_wrapper/docs/camera_pose.md) for supported convention, coordinate-system, units, and projection values:
 

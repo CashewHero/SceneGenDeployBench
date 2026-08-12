@@ -69,6 +69,7 @@ git push origin subtree/runner_wrapper --force-with-lease
 - [CLI](docs/cli.md): commands and options
 - [Pipelines](docs/pipelines.md): pipeline YAML contract
 - [Runner API](runner_wrapper/docs/api.md): runner HTTP and job contracts
+- [Depth Inputs](runner_wrapper/docs/depth.md): depth encodings, units, and geometric conventions
 - [Database](docs/database.md): durable schema and stored data
 - [Deployment](docs/deployment.md): images, Compose, shared paths, and logs
 - [Research Design](docs/research-design.md): benchmark methodology
