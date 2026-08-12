@@ -6,17 +6,27 @@
 depth:
   format: png
   encoding: float32_le_bgra
+  representation: ray_distance
   units: meters
 ```
 
 - `format` identifies the file container.
 - `encoding` defines the exact operation that produces a two-dimensional depth array. Runners use this field to select the decoder.
+- `representation` defines the geometric meaning of each decoded value. Runners use this field to decide whether the values match their camera model.
 
-## Depth Value Convention
+## Representations
 
-A decoded value is the straight-line distance from the camera center to the visible surface point, expressed in `units`. For a panorama, it is distance along each panorama ray.
+Encoding and representation are independent.
 
-Camera-axis Z-depth, disparity, and inverse depth do not follow this convention. Convert them during dataset preparation before publishing a `depth` input.
+### `camera_z`
+
+Each value is the visible surface point's Z coordinate in camera space: its perpendicular distance from the camera's image plane. This is the usual metric depth representation for pinhole cameras and RGB-D images. Values away from the optical axis are shorter than the corresponding camera-to-point distance.
+
+### `ray_distance`
+
+Each value is the straight-line distance from the camera center to the visible surface point along that pixel's viewing ray. This is also called range or Euclidean depth. It is the natural representation for spherical and equirectangular panoramas and is also valid for pinhole cameras.
+
+Disparity, inverse depth, normalized graphics depth buffers, and other non-metric values are distinct representations. Do not label them `camera_z` or `ray_distance`; a dataset and runner must define their conversion parameters explicitly.
 
 ## Encodings
 
