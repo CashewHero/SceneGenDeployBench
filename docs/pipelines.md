@@ -339,4 +339,6 @@ deploybench pipeline add --file /path/to/pipeline.yaml \
 
 See [CLI Pipelines](cli.md#pipelines) for all commands and options.
 
-The scheduler starts ready stages during its normal poll. Pipeline state, child pipeline runs, and runner jobs survive orchestrator restarts. Cancelling a pipeline cancels unfinished jobs and active script containers.
+The scheduler starts ready stages during its normal poll. Pipeline state, child pipeline runs, and runner jobs survive orchestrator restarts. Runner stages reuse matching completed jobs by default. Add the pipeline with `--rerun` to create new runner jobs instead, including in nested pipelines. Cancelling a pipeline cancels unfinished jobs and active script containers.
+
+When a runner stage reuses a completed job, the stage links to that job and exposes its result to downstream stages. A job owned by another pipeline becomes reusable after that pipeline completes its retention cleanup. Retention cleanup does not remove outputs owned by a reused job.

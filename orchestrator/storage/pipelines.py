@@ -10,6 +10,7 @@ from storage.db import (
     connect_database,
     dict_row,
     generated_identifier,
+    find_reusable_completed_job,
     insert_resolved_job_row,
     output_sample_payload,
     refresh_batch_record,
@@ -35,6 +36,7 @@ def create_pipeline_run(
     config_payload: dict[str, Any],
     lanes: list[dict[str, Any]],
     allow_start_outside_window: bool,
+    rerun: bool = False,
     pipeline_run_id: str | None = None,
 ) -> dict[str, Any]:
     run_id = pipeline_run_id or _id("pipeline")
@@ -46,9 +48,9 @@ def create_pipeline_run(
                 INSERT INTO pipeline_runs (
                   pipeline_run_id, pipeline_name, status, dataset_target,
                   config_path, config_json, lanes_json,
-                  allow_start_outside_window, created_at, updated_at
+                  allow_start_outside_window, rerun, created_at, updated_at
                 )
-                VALUES (%s, %s, 'pending', %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, 'pending', %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (pipeline_run_id) DO NOTHING
                 """,
                 (
@@ -59,6 +61,7 @@ def create_pipeline_run(
                     _json(config_payload),
                     _json(lanes),
                     allow_start_outside_window,
+                    rerun,
                     now,
                     now,
                 ),
@@ -69,6 +72,7 @@ def create_pipeline_run(
         "status": "pending",
         "dataset": dataset_target,
         "matrix_lane_count": len(lanes),
+        "rerun": rerun,
         "created_at": now,
     }
 
@@ -86,7 +90,7 @@ def fetch_pipeline_runs(
                 SELECT
                   pipeline_run_id, pipeline_name, status, dataset_target,
                   config_path, config_json, lanes_json,
-                  allow_start_outside_window,
+                  allow_start_outside_window, rerun,
                   created_at AT TIME ZONE 'UTC' AS created_at_utc,
                   updated_at AT TIME ZONE 'UTC' AS updated_at_utc,
                   completed_at AT TIME ZONE 'UTC' AS completed_at_utc,
@@ -110,7 +114,7 @@ def fetch_pipeline_run(
                 SELECT
                   pipeline_run_id, pipeline_name, status, dataset_target,
                   config_path, config_json, lanes_json,
-                  allow_start_outside_window,
+                  allow_start_outside_window, rerun,
                   created_at AT TIME ZONE 'UTC' AS created_at_utc,
                   updated_at AT TIME ZONE 'UTC' AS updated_at_utc,
                   completed_at AT TIME ZONE 'UTC' AS completed_at_utc,
@@ -137,6 +141,9 @@ def fetch_pipeline_stage_executions(
                   stage.dataset_name, stage.dataset_version,
                   stage.external_key, stage.sample_id, stage.job_id,
                   job.sample_metadata_json,
+                  stage.job_id IS NOT NULL AND
+                    job.pipeline_stage_execution_id IS DISTINCT FROM
+                      stage.pipeline_stage_execution_id AS reused,
                   COALESCE(job.status, stage.status) AS status,
                   COALESCE(job.result_json, stage.result_json) AS result_json,
                   job.output_dir,
@@ -189,6 +196,8 @@ def fetch_pipeline_job_outputs(
                 FROM pipeline_stage_executions AS stage
                 JOIN jobs AS job ON job.job_id = stage.job_id
                 WHERE stage.pipeline_run_id = %s
+                  AND job.pipeline_stage_execution_id =
+                    stage.pipeline_stage_execution_id
                 ORDER BY stage.created_at
                 """,
                 (pipeline_run_id,),
@@ -422,6 +431,7 @@ def insert_pipeline_stage_job(
     job_type: str,
     source_job_id: str | None,
     primary_output_metadata: Any = None,
+    rerun: bool = False,
 ) -> str | None:
     """Create the pipeline stage record and ordinary job in one transaction."""
     stage_execution_id = _id("stage")
@@ -462,6 +472,27 @@ def insert_pipeline_stage_job(
             )
             if cur.fetchone() is None:
                 return None
+            reusable_job_id = None
+            if not rerun:
+                reusable_job_id = find_reusable_completed_job(
+                    cur,
+                    runner=runner,
+                    identity=identity,
+                    inputs=inputs,
+                    parameters=parameters,
+                    job_type=job_type,
+                    primary_output_metadata=primary_output_metadata,
+                )
+            if reusable_job_id:
+                cur.execute(
+                    """
+                    UPDATE pipeline_stage_executions
+                    SET job_id = %s, updated_at = %s
+                    WHERE pipeline_stage_execution_id = %s
+                    """,
+                    (reusable_job_id, now, stage_execution_id),
+                )
+                return reusable_job_id
             insert_resolved_job_row(
                 cur,
                 job_id=job_id,

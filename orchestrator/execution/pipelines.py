@@ -887,6 +887,7 @@ def _materialize_runner_stage(
             allow_start_outside_window=bool(run["allow_start_outside_window"]),
             job_type="dataset_download",
             source_job_id=None,
+            rerun=bool(run.get("rerun", False)),
         )
         return job_id is not None
 
@@ -984,6 +985,7 @@ def _materialize_runner_stage(
             ),
             source_job_id=source_job_id,
             primary_output_metadata=source.output_metadata,
+            rerun=bool(run.get("rerun", False)),
         )
         created = created or job_id is not None
     if not sources and stage_dependencies(stage) and not existing:
@@ -1221,6 +1223,7 @@ def _materialize_pipeline_stage(
                 config_payload=payload,
                 lanes=child_lanes,
                 allow_start_outside_window=bool(run["allow_start_outside_window"]),
+                rerun=bool(run.get("rerun", False)),
                 pipeline_run_id=child_id,
             )
             return True
@@ -1286,6 +1289,7 @@ def _materialize_pipeline_stage(
         config_payload=payload,
         lanes=child_lanes,
         allow_start_outside_window=bool(run["allow_start_outside_window"]),
+        rerun=bool(run.get("rerun", False)),
         pipeline_run_id=child_id,
     )
     return True

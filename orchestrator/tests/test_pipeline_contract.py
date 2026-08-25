@@ -106,6 +106,22 @@ class PipelineContractTests(unittest.TestCase):
         )
         self.assertEqual(args.runner, "other_runner")
 
+    def test_rerun_flag_is_shared_by_job_and_pipeline_add(self) -> None:
+        parser = build_parser()
+
+        self.assertFalse(
+            parser.parse_args(["job", "add", "--dataset", "test-data"]).rerun
+        )
+        self.assertTrue(
+            parser.parse_args(
+                ["job", "add", "--dataset", "test-data", "--rerun"]
+            ).rerun
+        )
+        self.assertFalse(parser.parse_args(["pipeline", "add", "example"]).rerun)
+        self.assertTrue(
+            parser.parse_args(["pipeline", "add", "example", "--rerun"]).rerun
+        )
+
     def test_pipeline_runner_reference_requires_a_value(self) -> None:
         with self.assertRaisesRegex(
             ValueError, "pipeline input 'runner' is not defined"

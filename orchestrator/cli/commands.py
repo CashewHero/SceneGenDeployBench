@@ -1081,6 +1081,7 @@ def add_job(
     allow_start_outside_window: bool,
     batch_id: str | None,
     job_id: str | None,
+    rerun: bool = False,
 ) -> dict[str, Any]:
     config = load_runtime_config(config_path)
     resolved_runner = _resolve_runner_for_job_add(
@@ -1105,6 +1106,7 @@ def add_job(
         timeout_seconds=effective_timeout_seconds,
         source_job_id=source_job_id.strip() if source_job_id else None,
         allow_start_outside_window=allow_start_outside_window,
+        rerun=rerun,
     )
     created_ids = [str(row.get("job_ref") or row.get("job_id") or "") for row in payload.get("jobs", [])]
     records = _job_records_by_ids(config, [job_id for job_id in created_ids if job_id])
@@ -1336,6 +1338,7 @@ def add_pipeline(
     parameter_settings: list[str] | None,
     matrix_values: list[str] | None,
     allow_start_outside_window: bool,
+    rerun: bool = False,
 ) -> dict[str, Any]:
     from storage.db import ensure_schema
 
@@ -1419,6 +1422,7 @@ def add_pipeline(
         config_payload=config_payload,
         lanes=lanes,
         allow_start_outside_window=allow_start_outside_window,
+        rerun=rerun,
     )
     run = fetch_pipeline_run(config, str(payload["pipeline_run_id"]))
     if run is None:

@@ -151,6 +151,13 @@ CREATE INDEX IF NOT EXISTS idx_jobs_updated
 CREATE INDEX IF NOT EXISTS idx_jobs_pipeline_stage_execution
   ON jobs (pipeline_stage_execution_id);
 
+CREATE INDEX IF NOT EXISTS idx_jobs_completed_reuse
+  ON jobs (
+    runner_selector, job_type, dataset_name, dataset_version, external_key,
+    completed_at DESC
+  )
+  WHERE status = 'completed';
+
 CREATE TABLE IF NOT EXISTS batches (
   batch_id TEXT PRIMARY KEY,
   runner_selector TEXT NOT NULL,
@@ -217,11 +224,15 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
   config_json JSONB NOT NULL,
   lanes_json JSONB NOT NULL DEFAULT '[]'::jsonb,
   allow_start_outside_window BOOLEAN NOT NULL DEFAULT FALSE,
+  rerun BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   completed_at TIMESTAMPTZ,
   failure_message TEXT
 );
+
+ALTER TABLE pipeline_runs
+  ADD COLUMN IF NOT EXISTS rerun BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE INDEX IF NOT EXISTS idx_pipeline_runs_status_created
   ON pipeline_runs (status, created_at);
@@ -1526,6 +1537,92 @@ def insert_resolved_job_row(
     return request_payload
 
 
+def find_reusable_completed_job(
+    cur,
+    *,
+    runner: RunnerDefinition,
+    identity: dict[str, Any],
+    inputs: dict[str, Any],
+    parameters: dict[str, Any],
+    job_type: str,
+    primary_output_metadata: Any = None,
+    rescan_after_download: bool | None = None,
+) -> str | None:
+    """Return the newest completed job with the same effective runner request."""
+    metadata = dict(identity.get("metadata_json") or {})
+    primary_sample = str(
+        identity.get("primary_sample")
+        or identity.get("sample_id")
+        or identity.get("external_key")
+        or ""
+    ).strip()
+    output_metadata = normalize_output_metadata(primary_output_metadata)
+    effective_rescan = (
+        runner.rescan_after_download
+        if job_type == "dataset_download" and rescan_after_download is None
+        else bool(rescan_after_download)
+        if job_type == "dataset_download"
+        else None
+    )
+    cur.execute(
+        """
+        SELECT job.job_id
+        FROM jobs AS job
+        LEFT JOIN pipeline_runs AS owner
+          ON owner.pipeline_run_id = job.pipeline_run_id
+        WHERE job.runner_selector = %s
+          AND job.job_type = %s
+          AND job.dataset_name = %s
+          AND job.dataset_version = %s
+          AND job.external_key = %s
+          AND job.status = 'completed'
+          AND (
+                job.pipeline_run_id IS NULL
+                OR owner.status = 'completed'
+              )
+          AND (job.result_json->>'outputs_removed') IS DISTINCT FROM 'true'
+          AND job.config_json = %s
+          AND job.request_json->'inputs' = %s
+          AND job.request_json->'contract_version' = %s
+          AND COALESCE(job.request_json->'job'->>'primary_sample', '') = %s
+          AND COALESCE(
+                job.request_json->'job'->'primary_sample_metadata',
+                '{}'::jsonb
+              ) = %s
+          AND COALESCE(
+                job.request_json->'job'->'primary_output_metadata',
+                '{}'::jsonb
+              ) = %s
+          AND COALESCE(
+                job.request_json->'job'->'rescan_after_download',
+                'null'::jsonb
+              ) = %s
+        ORDER BY job.completed_at DESC, job.job_id DESC
+        LIMIT 1
+        """,
+        (
+            runner.selector,
+            job_type,
+            identity["dataset_name"],
+            identity["dataset_version"],
+            identity["external_key"],
+            _json_object(parameters),
+            _json_object(inputs),
+            _json_object(runner.contract_version),
+            primary_sample,
+            _json_object(metadata),
+            _json_object(output_metadata),
+            Jsonb(effective_rescan),
+        ),
+    )
+    row = cur.fetchone()
+    if isinstance(row, dict):
+        return str(row.get("job_id") or "") or None
+    if isinstance(row, (tuple, list)) and row:
+        return str(row[0] or "") or None
+    return None
+
+
 def insert_jobs(
     config: OrchestratorConfig,
     *,
@@ -1538,6 +1635,7 @@ def insert_jobs(
     timeout_seconds: int,
     source_job_id: str | None,
     allow_start_outside_window: bool,
+    rerun: bool = False,
 ) -> dict[str, Any]:
     sync_runner_state(config)
     dataset_target = (dataset or "").strip()
@@ -1622,7 +1720,9 @@ def insert_jobs(
         data_rows_by_identity.setdefault(_sample_identity(row), []).append(row)
 
     now = utc_now_timestamp()
-    created_jobs: list[dict[str, Any]] = []
+    jobs: list[dict[str, Any]] = []
+    created_job_count = 0
+    reused_job_count = 0
     with connect_database(config) as conn:
         with conn.cursor() as cur:
             for sample_row in primary_rows:
@@ -1740,7 +1840,6 @@ def insert_jobs(
                         optional_datatypes=reference_optional,
                         field_name=f"reference sample {candidate['external_key']!r}",
                     )
-                job_id = generated_identifier("job")
                 inputs: dict[str, dict[str, dict[str, Any]]] = {}
                 if selected_data and sample_key:
                     inputs["data"] = {sample_key: selected_data}
@@ -1749,19 +1848,45 @@ def insert_jobs(
                 if selected_references:
                     inputs["references"] = selected_references
 
+                identity = {
+                    "dataset_name": sample_row["dataset_name"],
+                    "dataset_version": sample_row["dataset_version"],
+                    "external_key": sample_row["external_key"],
+                    "subset_key": sample_row["subset_key"] or "",
+                    "sample_id": sample_row["sample_id"],
+                    "primary_sample": sample_key,
+                    "metadata_json": sample_metadata,
+                }
+                reusable_job_id = None
+                if not rerun:
+                    reusable_job_id = find_reusable_completed_job(
+                        cur,
+                        runner=runner,
+                        identity=identity,
+                        inputs=inputs,
+                        parameters=parameters,
+                        job_type=job_type,
+                        primary_output_metadata=primary_output_metadata,
+                    )
+                if reusable_job_id:
+                    reused_job_count += 1
+                    jobs.append(
+                        {
+                            "job_id": reusable_job_id,
+                            "job_ref": reusable_job_id,
+                            "sample": sample_row["external_key"],
+                            "state": "completed",
+                            "reused": True,
+                        }
+                    )
+                    continue
+
+                job_id = generated_identifier("job")
                 insert_resolved_job_row(
                     cur,
                     job_id=job_id,
                     runner=runner,
-                    identity={
-                        "dataset_name": sample_row["dataset_name"],
-                        "dataset_version": sample_row["dataset_version"],
-                        "external_key": sample_row["external_key"],
-                        "subset_key": sample_row["subset_key"] or "",
-                        "sample_id": sample_row["sample_id"],
-                        "primary_sample": sample_key,
-                        "metadata_json": sample_metadata,
-                    },
+                    identity=identity,
                     inputs=inputs,
                     parameters=parameters,
                     timeout_seconds=timeout_seconds,
@@ -1771,16 +1896,21 @@ def insert_jobs(
                     now=now,
                     primary_output_metadata=primary_output_metadata,
                 )
-                created_jobs.append(
+                created_job_count += 1
+                jobs.append(
                     {
                         "job_id": job_id,
                         "job_ref": job_id,
                         "sample": sample_row["external_key"],
                         "state": "pending",
+                        "reused": False,
                     }
                 )
     return {
-        "job_count": len(created_jobs),
+        "job_count": created_job_count,
+        "created_job_count": created_job_count,
+        "reused_job_count": reused_job_count,
+        "requested_job_count": len(jobs),
         "created_at": now,
         "dataset": dataset_name,
         "dataset_version": primary_rows[0]["dataset_version"],
@@ -1788,8 +1918,9 @@ def insert_jobs(
         "job_type": job_type,
         "timeout_seconds": timeout_seconds,
         "allow_start_outside_window": allow_start_outside_window,
+        "rerun": rerun,
         "parameters": dict(parameters),
-        "jobs": created_jobs,
+        "jobs": jobs,
     }
 
 

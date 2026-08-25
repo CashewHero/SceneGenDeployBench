@@ -159,6 +159,11 @@ def build_parser() -> argparse.ArgumentParser:
     job_add.add_argument("--timeout-minutes", type=float, help="override job timeout in minutes")
     job_add.add_argument("--source-job", dest="source_job_id", help="optional upstream job reference")
     job_add.add_argument("--allow-outside-window", action="store_true", help="allow this job to start outside active windows")
+    job_add.add_argument(
+        "--rerun",
+        action="store_true",
+        help="create jobs even when matching completed jobs exist",
+    )
 
     job_list = job_subparsers.add_parser("list", help="list jobs or grouped job summaries")
     job_list.add_argument("--job", action="append", dest="job_ids", default=[], help="exact job id or batch_id/job_id")
@@ -312,6 +317,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-outside-window",
         action="store_true",
         help="allow jobs created by this pipeline to start outside active windows",
+    )
+    pipeline_add.add_argument(
+        "--rerun",
+        action="store_true",
+        help="create runner jobs even when matching completed jobs exist",
     )
     pipeline_runs = pipeline_subparsers.add_parser(
         "runs", help="list durable pipeline runs"
@@ -782,12 +792,14 @@ def handle_job_add(args: argparse.Namespace) -> int:
         allow_start_outside_window=args.allow_outside_window,
         batch_id=None,
         job_id=None,
+        rerun=args.rerun,
     )
     if output_format(args, "text") == "json":
         print_json(payload)
         return 0
     print(render_key_value([
-        ("Job Count", payload["job_count"]),
+        ("Created Jobs", payload["created_job_count"]),
+        ("Reused Jobs", payload["reused_job_count"]),
         ("Created", format_timestamp(payload["created_at"])),
         ("Dataset", payload["dataset"]),
         ("Dataset Version", payload["dataset_version"]),
@@ -1069,6 +1081,7 @@ def handle_pipeline_add(args: argparse.Namespace) -> int:
         parameter_settings=args.settings,
         matrix_values=args.matrix,
         allow_start_outside_window=args.allow_outside_window,
+        rerun=args.rerun,
     )
     if output_format(args, "text") == "json":
         print_json(payload)
@@ -1082,6 +1095,7 @@ def handle_pipeline_add(args: argparse.Namespace) -> int:
                 ("Dataset", payload["dataset_target"]),
                 ("Runner", payload["runner"] or "-"),
                 ("Matrix Lanes", len(payload.get("lanes_json") or [])),
+                ("Rerun", "yes" if payload.get("rerun") else "no"),
                 ("Created", format_timestamp(payload["created_at_utc"])),
             ]
         )
