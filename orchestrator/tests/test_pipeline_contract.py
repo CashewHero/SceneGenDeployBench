@@ -852,6 +852,76 @@ class PipelineContractTests(unittest.TestCase):
             self.assertTrue((runner_one / "scene.ply").exists())
             mark_removed.assert_called_once_with(config, ["job-0"])
 
+    def test_matrix_retention_defers_shared_runner_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = SimpleNamespace(
+                storage=SimpleNamespace(
+                    pipeline_root=root / "pipelines",
+                    output_root=root / "output",
+                ),
+            )
+            runner_root = root / "output/runner/dataset/shared"
+            runner_root.mkdir(parents=True)
+            output_file = runner_root / "scene.ply"
+            output_file.write_text("shared", encoding="utf-8")
+            run = {
+                "pipeline_run_id": "pipeline_20260725T120000_deadbeef",
+                "pipeline_name": "example",
+                "lanes_json": [{"value": 1}, {"value": 2}],
+                "config_json": {
+                    "stages": {
+                        "generate": {
+                            "runner": "runner",
+                            "scope": "matrix",
+                            "retention": "matrix",
+                        }
+                    }
+                },
+            }
+            records = [
+                {
+                    "stage_id": "generate",
+                    "lane_index": 0,
+                    "job_id": "job-shared",
+                    "output_dir": str(runner_root),
+                    "result_json": {
+                        "output_files": {
+                            "sample": {"3dgs": "scene.ply"}
+                        }
+                    },
+                    "artifacts_json": [],
+                    "shared": True,
+                }
+            ]
+
+            with (
+                patch(
+                    "execution.pipelines.fetch_pipeline_job_outputs",
+                    return_value=records,
+                ),
+                patch(
+                    "execution.pipelines.mark_pipeline_job_outputs_removed"
+                ) as mark_removed,
+            ):
+                cleanup_pipeline_outputs(
+                    config,
+                    run,
+                    retentions={"matrix"},
+                    lane_index=0,
+                )
+                self.assertTrue(output_file.exists())
+                mark_removed.assert_not_called()
+
+                cleanup_pipeline_outputs(
+                    config,
+                    run,
+                    retentions={"matrix"},
+                )
+
+            self.assertFalse(output_file.exists())
+            mark_removed.assert_called_once_with(config, ["job-shared"])
+
 
 if __name__ == "__main__":
     unittest.main()

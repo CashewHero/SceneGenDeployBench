@@ -162,7 +162,7 @@ def build_parser() -> argparse.ArgumentParser:
     job_add.add_argument(
         "--rerun",
         action="store_true",
-        help="create jobs even when matching completed jobs exist",
+        help="create jobs without reusing matching active or completed jobs",
     )
 
     job_list = job_subparsers.add_parser("list", help="list jobs or grouped job summaries")
@@ -321,7 +321,7 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline_add.add_argument(
         "--rerun",
         action="store_true",
-        help="create runner jobs even when matching completed jobs exist",
+        help="create runner jobs without reusing jobs from earlier submissions",
     )
     pipeline_runs = pipeline_subparsers.add_parser(
         "runs", help="list durable pipeline runs"

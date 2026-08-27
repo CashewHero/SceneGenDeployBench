@@ -9,8 +9,8 @@ from storage.db import (
     Jsonb,
     connect_database,
     dict_row,
+    find_reusable_job,
     generated_identifier,
-    find_reusable_completed_job,
     insert_resolved_job_row,
     output_sample_payload,
     refresh_batch_record,
@@ -212,7 +212,14 @@ def fetch_pipeline_job_outputs(
                   job.job_id,
                   job.output_dir,
                   job.result_json,
-                  job.artifacts_json
+                  job.artifacts_json,
+                  EXISTS (
+                    SELECT 1
+                    FROM pipeline_stage_executions AS reference
+                    WHERE reference.job_id = stage.job_id
+                      AND reference.pipeline_stage_execution_id IS DISTINCT FROM
+                        stage.pipeline_stage_execution_id
+                  ) AS shared
                 FROM pipeline_stage_executions AS stage
                 JOIN jobs AS job ON job.job_id = stage.job_id
                 WHERE stage.pipeline_run_id = %s
@@ -492,9 +499,19 @@ def insert_pipeline_stage_job(
             )
             if cur.fetchone() is None:
                 return None
-            reusable_job_id = None
-            if not rerun:
-                reusable_job_id = find_reusable_completed_job(
+            reusable_job = find_reusable_job(
+                cur,
+                pipeline_run_id=pipeline_run_id,
+                stage_id=stage_id,
+                runner=runner,
+                identity=identity,
+                inputs=inputs,
+                parameters=parameters,
+                job_type=job_type,
+                primary_output_metadata=primary_output_metadata,
+            )
+            if reusable_job is None and not rerun:
+                reusable_job = find_reusable_job(
                     cur,
                     runner=runner,
                     identity=identity,
@@ -503,7 +520,8 @@ def insert_pipeline_stage_job(
                     job_type=job_type,
                     primary_output_metadata=primary_output_metadata,
                 )
-            if reusable_job_id:
+            if reusable_job:
+                reusable_job_id = reusable_job["job_id"]
                 cur.execute(
                     """
                     UPDATE pipeline_stage_executions

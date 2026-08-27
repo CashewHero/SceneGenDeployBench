@@ -89,6 +89,8 @@ matrix:
 
 This matrix creates six lanes. A matrix-scoped stage runs once in each lane and reads the current values with `${{ matrix.<path> }}`.
 
+Matrix lanes remain separate stage executions. Within one runner stage, lanes with the same resolved runner, inputs, and parameters share one runner job and observe the same result. Script and child-pipeline stages still execute separately in every lane.
+
 Override declared axes when adding a pipeline:
 
 ```bash
@@ -162,6 +164,8 @@ Runner and script stages also accept `retention`:
 | `none` | Delete outputs as soon as the stage execution finishes |
 
 On a pipeline-scoped stage, `retention: matrix` behaves as `pipeline`. A later runner input cannot consume files from a stage using `retention: none`. Child-pipeline stages do not accept `retention`; configure retention inside the child pipeline.
+
+When several matrix lanes share one runner job, its outputs remain until pipeline cleanup so one lane cannot delete files still referenced by another lane.
 
 A matrix-scoped stage depending on a pipeline-scoped stage uses the same dependency result in every lane. A pipeline-scoped stage depending on a matrix-scoped stage waits for every lane and sees all applicable dependency executions.
 
@@ -339,6 +343,6 @@ deploybench pipeline add --file /path/to/pipeline.yaml \
 
 See [CLI Pipelines](cli.md#pipelines) for all commands and options.
 
-The scheduler starts ready stages during its normal poll. Pipeline state, child pipeline runs, and runner jobs survive orchestrator restarts. Runner stages reuse matching completed jobs by default. Add the pipeline with `--rerun` to create new runner jobs instead, including in nested pipelines. Cancelling a pipeline cancels unfinished jobs and active script containers.
+The scheduler starts ready stages during its normal poll. Pipeline state, child pipeline runs, and runner jobs survive orchestrator restarts. Runner stages reuse matching standalone active jobs and completed jobs by default. Add the pipeline with `--rerun` to prevent reuse from earlier submissions, including in nested pipelines. Identical lanes within the same runner stage still share one job. Cancelling a pipeline cancels unfinished jobs and active script containers.
 
-When a runner stage reuses a completed job, the stage links to that job and exposes its result to downstream stages. A job owned by another pipeline becomes reusable after that pipeline completes its retention cleanup. Retention cleanup does not remove outputs owned by a reused job.
+When a runner stage reuses a job, the stage links to its status and result. Downstream stages wait if the reused job is still active. A job owned by another pipeline becomes reusable after that pipeline completes its retention cleanup. Retention cleanup does not remove outputs owned by a reused job.

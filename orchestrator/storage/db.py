@@ -1573,7 +1573,7 @@ def insert_resolved_job_row(
     return request_payload
 
 
-def find_reusable_completed_job(
+def find_reusable_job(
     cur,
     *,
     runner: RunnerDefinition,
@@ -1583,8 +1583,12 @@ def find_reusable_completed_job(
     job_type: str,
     primary_output_metadata: Any = None,
     rescan_after_download: bool | None = None,
-) -> str | None:
-    """Return the newest completed job with the same effective runner request."""
+    pipeline_run_id: str | None = None,
+    stage_id: str | None = None,
+) -> dict[str, str] | None:
+    """Return an identical active or completed job that is safe to share."""
+    if (pipeline_run_id is None) != (stage_id is None):
+        raise ValueError("pipeline_run_id and stage_id must be provided together")
     metadata = dict(identity.get("metadata_json") or {})
     primary_sample = str(
         identity.get("primary_sample")
@@ -1600,22 +1604,55 @@ def find_reusable_completed_job(
         if job_type == "dataset_download"
         else None
     )
-    cur.execute(
-        """
-        SELECT job.job_id
-        FROM jobs AS job
+    if pipeline_run_id is None:
+        owner_join = """
         LEFT JOIN pipeline_runs AS owner
           ON owner.pipeline_run_id = job.pipeline_run_id
+        """
+        scope_filter = """
+          AND (
+                (
+                  job.pipeline_run_id IS NULL
+                  AND job.status IN ('pending', 'running')
+                )
+                OR (
+                  job.status = 'completed'
+                  AND (
+                    job.pipeline_run_id IS NULL
+                    OR owner.status = 'completed'
+                  )
+                )
+              )
+        """
+        scope_parameters: tuple[Any, ...] = ()
+        order_by = """
+        CASE WHEN job.status = 'completed' THEN 0 ELSE 1 END,
+        job.completed_at DESC NULLS LAST, job.created_at, job.job_id
+        """
+    else:
+        owner_join = """
+        JOIN pipeline_stage_executions AS owner_stage
+          ON owner_stage.pipeline_stage_execution_id =
+            job.pipeline_stage_execution_id
+        """
+        scope_filter = """
+          AND job.pipeline_run_id = %s
+          AND owner_stage.stage_id = %s
+          AND job.status IN ('pending', 'running', 'completed')
+        """
+        scope_parameters = (pipeline_run_id, stage_id)
+        order_by = "job.created_at, job.job_id"
+    cur.execute(
+        f"""
+        SELECT job.job_id, job.status
+        FROM jobs AS job
+        {owner_join}
         WHERE job.runner_selector = %s
           AND job.job_type = %s
           AND job.dataset_name = %s
           AND job.dataset_version = %s
           AND job.external_key = %s
-          AND job.status = 'completed'
-          AND (
-                job.pipeline_run_id IS NULL
-                OR owner.status = 'completed'
-              )
+          {scope_filter}
           AND (job.result_json->>'outputs_removed') IS DISTINCT FROM 'true'
           AND job.config_json = %s
           AND job.request_json->'inputs' = %s
@@ -1623,17 +1660,17 @@ def find_reusable_completed_job(
           AND COALESCE(job.request_json->'job'->>'primary_sample', '') = %s
           AND COALESCE(
                 job.request_json->'job'->'primary_sample_metadata',
-                '{}'::jsonb
+                '{{}}'::jsonb
               ) = %s
           AND COALESCE(
                 job.request_json->'job'->'primary_output_metadata',
-                '{}'::jsonb
+                '{{}}'::jsonb
               ) = %s
           AND COALESCE(
                 job.request_json->'job'->'rescan_after_download',
                 'null'::jsonb
               ) = %s
-        ORDER BY job.completed_at DESC, job.job_id DESC
+        ORDER BY {order_by}
         LIMIT 1
         """,
         (
@@ -1642,6 +1679,7 @@ def find_reusable_completed_job(
             identity["dataset_name"],
             identity["dataset_version"],
             identity["external_key"],
+            *scope_parameters,
             _json_object(parameters),
             _json_object(inputs),
             _json_object(runner.contract_version),
@@ -1653,9 +1691,21 @@ def find_reusable_completed_job(
     )
     row = cur.fetchone()
     if isinstance(row, dict):
-        return str(row.get("job_id") or "") or None
+        job_id = str(row.get("job_id") or "")
+        if job_id:
+            return {
+                "job_id": job_id,
+                "status": str(row.get("status") or ""),
+            }
+        return None
     if isinstance(row, (tuple, list)) and row:
-        return str(row[0] or "") or None
+        job_id = str(row[0] or "")
+        if job_id:
+            return {
+                "job_id": job_id,
+                "status": str(row[1] or "") if len(row) > 1 else "",
+            }
+        return None
     return None
 
 
@@ -1893,9 +1943,9 @@ def insert_jobs(
                     "primary_sample": sample_key,
                     "metadata_json": sample_metadata,
                 }
-                reusable_job_id = None
+                reusable_job = None
                 if not rerun:
-                    reusable_job_id = find_reusable_completed_job(
+                    reusable_job = find_reusable_job(
                         cur,
                         runner=runner,
                         identity=identity,
@@ -1904,14 +1954,14 @@ def insert_jobs(
                         job_type=job_type,
                         primary_output_metadata=primary_output_metadata,
                     )
-                if reusable_job_id:
+                if reusable_job:
                     reused_job_count += 1
                     jobs.append(
                         {
-                            "job_id": reusable_job_id,
-                            "job_ref": reusable_job_id,
+                            "job_id": reusable_job["job_id"],
+                            "job_ref": reusable_job["job_id"],
                             "sample": sample_row["external_key"],
-                            "state": "completed",
+                            "state": reusable_job["status"],
                             "reused": True,
                         }
                     )

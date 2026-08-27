@@ -1349,6 +1349,8 @@ def _remove_runner_outputs(
     config: OrchestratorConfig,
     records: list[dict[str, Any]],
 ) -> None:
+    if not records:
+        return
     removed_jobs: list[str] = []
     output_root = config.storage.output_root.resolve()
     for record in records:
@@ -1426,6 +1428,7 @@ def cleanup_pipeline_outputs(
             lane_index is None
             or int(record["lane_index"]) == lane_index
         )
+        and (lane_index is None or not bool(record.get("shared")))
     ]
     _remove_runner_outputs(config, runner_records)
 

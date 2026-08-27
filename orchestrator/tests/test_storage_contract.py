@@ -415,7 +415,7 @@ class StorageContractTests(unittest.TestCase):
             patch.object(db_storage, "generated_identifier", return_value="job-1"),
             patch.object(
                 db_storage,
-                "find_reusable_completed_job",
+                "find_reusable_job",
                 return_value=None,
             ),
             patch.object(db_storage, "insert_resolved_job_row") as insert_job,
@@ -447,7 +447,7 @@ class StorageContractTests(unittest.TestCase):
         )
         self.assertEqual(kwargs["source_job_id"], "job-generator")
 
-    def test_job_add_reuses_completed_job_unless_rerun(self) -> None:
+    def test_job_add_reuses_active_job_unless_rerun(self) -> None:
         config = load_config(str(self.config_path))
         runner = config.runners["test_runner@0.1.0"]
         sample_row = {
@@ -489,8 +489,8 @@ class StorageContractTests(unittest.TestCase):
             ),
             patch.object(
                 db_storage,
-                "find_reusable_completed_job",
-                return_value="job-completed",
+                "find_reusable_job",
+                return_value={"job_id": "job-active", "status": "running"},
             ) as find_reusable,
             patch.object(db_storage, "insert_resolved_job_row") as insert_job,
         ):
@@ -523,6 +523,7 @@ class StorageContractTests(unittest.TestCase):
         self.assertEqual(reused["created_job_count"], 0)
         self.assertEqual(reused["reused_job_count"], 1)
         self.assertTrue(reused["jobs"][0]["reused"])
+        self.assertEqual(reused["jobs"][0]["state"], "running")
         self.assertEqual(rerun["created_job_count"], 1)
         self.assertEqual(rerun["reused_job_count"], 0)
         self.assertFalse(rerun["jobs"][0]["reused"])
@@ -547,8 +548,8 @@ class StorageContractTests(unittest.TestCase):
             ),
             patch.object(
                 pipeline_storage,
-                "find_reusable_completed_job",
-                return_value="job-completed",
+                "find_reusable_job",
+                return_value={"job_id": "job-completed", "status": "completed"},
             ),
             patch.object(
                 pipeline_storage,
@@ -592,14 +593,123 @@ class StorageContractTests(unittest.TestCase):
         self.assertIn("UPDATE pipeline_stage_executions", update_query)
         self.assertEqual(update_params[0], "job-completed")
 
+    def test_pipeline_stage_links_matching_job_from_same_run(self) -> None:
+        config = load_config(str(self.config_path))
+        runner = config.runners["test_runner@0.1.0"]
+        cursor = Mock()
+        cursor.fetchone.return_value = {
+            "pipeline_stage_execution_id": "stage-2"
+        }
+        connection = Mock()
+        connection.cursor.return_value = nullcontext(cursor)
+
+        with (
+            patch.object(
+                pipeline_storage,
+                "connect_database",
+                return_value=nullcontext(connection),
+            ),
+            patch.object(
+                pipeline_storage,
+                "find_reusable_job",
+                return_value={"job_id": "job-active", "status": "pending"},
+            ) as find_matching,
+            patch.object(
+                pipeline_storage,
+                "insert_resolved_job_row",
+            ) as insert_job,
+            patch.object(
+                pipeline_storage,
+                "Jsonb",
+                side_effect=lambda value: value,
+            ),
+        ):
+            job_id = pipeline_storage.insert_pipeline_stage_job(
+                config,
+                pipeline_run_id="pipeline-1",
+                stage_id="generate",
+                lane_index=1,
+                lane={"first": 1, "second": "b"},
+                runner=runner,
+                identity={
+                    "dataset_name": "example_set1",
+                    "dataset_version": "1",
+                    "external_key": "sample-1",
+                    "sample_id": "sample-1",
+                    "metadata_json": {},
+                },
+                inputs={
+                    "data": {
+                        "sample-1": {"image": "/data/sample-1.png"}
+                    }
+                },
+                parameters={"first": 1},
+                timeout_seconds=60,
+                allow_start_outside_window=False,
+                job_type="generation",
+                source_job_id=None,
+                rerun=True,
+            )
+
+        self.assertEqual(job_id, "job-active")
+        find_matching.assert_called_once()
+        self.assertEqual(find_matching.call_args.kwargs["pipeline_run_id"], "pipeline-1")
+        self.assertEqual(find_matching.call_args.kwargs["stage_id"], "generate")
+        insert_job.assert_not_called()
+        update_query, update_params = cursor.execute.call_args.args
+        self.assertIn("UPDATE pipeline_stage_executions", update_query)
+        self.assertEqual(update_params[0], "job-active")
+
+    def test_matching_pipeline_job_includes_active_jobs_from_same_stage(self) -> None:
+        config = load_config(str(self.config_path))
+        runner = config.runners["test_runner@0.1.0"]
+        cursor = Mock()
+        cursor.fetchone.return_value = {"job_id": "job-active", "status": "running"}
+
+        with patch.object(db_storage, "Jsonb", side_effect=lambda value: value):
+            reusable_job = db_storage.find_reusable_job(
+                cursor,
+                pipeline_run_id="pipeline-1",
+                stage_id="generate",
+                runner=runner,
+                identity={
+                    "dataset_name": "example_set1",
+                    "dataset_version": "1",
+                    "external_key": "sample-1",
+                    "sample_id": "sample-1",
+                    "metadata_json": {},
+                },
+                inputs={
+                    "data": {
+                        "sample-1": {"image": "/data/sample-1.png"}
+                    }
+                },
+                parameters={"first": 1},
+                job_type="generation",
+            )
+
+        self.assertEqual(
+            reusable_job,
+            {"job_id": "job-active", "status": "running"},
+        )
+        query, parameters = cursor.execute.call_args.args
+        self.assertIn("job.pipeline_run_id = %s", query)
+        self.assertIn("owner_stage.stage_id = %s", query)
+        self.assertIn("'pending', 'running', 'completed'", query)
+        self.assertIn("pipeline-1", parameters)
+        self.assertIn("generate", parameters)
+
     def test_reuse_lookup_requires_an_intact_completed_result(self) -> None:
         config = load_config(str(self.config_path))
         runner = config.runners["test_runner@0.1.0"]
         cursor = Mock()
-        cursor.fetchone.return_value = {"job_id": "job-completed"}
+        cursor.fetchone.return_value = {
+            "job_id": "job-completed",
+            "status": "completed",
+        }
 
         with patch.object(db_storage, "Jsonb", side_effect=lambda value: value):
-            job_id = db_storage.find_reusable_completed_job(
+            reusable_job = db_storage.find_reusable_job(
                 cursor,
                 runner=runner,
                 identity={
@@ -618,9 +728,14 @@ class StorageContractTests(unittest.TestCase):
                 job_type="evaluation",
             )
 
-        self.assertEqual(job_id, "job-completed")
+        self.assertEqual(
+            reusable_job,
+            {"job_id": "job-completed", "status": "completed"},
+        )
         query = cursor.execute.call_args.args[0]
         self.assertIn("status = 'completed'", query)
+        self.assertIn("job.status IN ('pending', 'running')", query)
+        self.assertIn("job.pipeline_run_id IS NULL", query)
         self.assertIn("outputs_removed", query)
         self.assertIn("request_json->'inputs'", query)
         self.assertIn("config_json =", query)

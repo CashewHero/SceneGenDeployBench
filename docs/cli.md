@@ -115,7 +115,7 @@ deploybench job add --dataset testset1 --runner test_runner --rerun
 
 Runner catalogs may define default `job_parameters`. Repeated `--set key=value` options override those defaults for the jobs being created. Override values are converted to the type of the catalog default.
 
-By default, `job add` reuses a completed job with the same exact runner version, sample identity, resolved inputs, effective parameters, contract version, and runner-visible metadata. It does not reuse failed, cancelled, pending, or running jobs. Use `--rerun` to create a new job even when a matching completed job exists.
+By default, `job add` reuses a job with the same exact runner version, sample identity, resolved inputs, effective parameters, contract version, and runner-visible metadata. It does not reuse failed or cancelled jobs, or active jobs owned by a pipeline. Use `--rerun` to create a new standalone job instead.
 
 `--dataset`, `--candidate`, and `--reference` accept either dataset or output targets and map directly to their input roles. With only `--candidate`, the candidate's original job's `inputs.data` is reused; an explicit `--dataset` replaces that default.
 
@@ -151,7 +151,7 @@ Important `job add` options:
 - `--timeout-minutes <n>` overrides the runner's `scheduling.job_timeout_minutes` default
 - `--source-job <job-id>`
 - `--allow-outside-window`
-- `--rerun` bypasses completed-job reuse
+- `--rerun` bypasses job reuse
 
 ## Batches
 
@@ -201,4 +201,4 @@ deploybench pipeline cancel <pipeline-run-id>
 
 `--dataset` and `--runner` override optional top-level pipeline defaults. Use repeatable `--set key=value` options to override declared pipeline parameters and `--matrix key=value1,value2` options to override declared axes. `--allow-outside-window` is applied to runner jobs created by the pipeline.
 
-Pipeline runner stages reuse matching completed jobs by default. `--rerun` creates new jobs for every runner stage, including runner stages in nested pipelines.
+Pipeline runner stages reuse matching standalone active jobs and completed jobs by default. `--rerun` prevents reuse from earlier submissions. Identical matrix lanes within the same runner stage still share one job.

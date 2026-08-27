@@ -99,7 +99,7 @@ pipeline_runs ----< pipeline_stage_executions
 - `status`
 - `dataset_target`
 - normalized pipeline config and matrix lanes
-- `rerun`: whether runner stages bypass completed-job reuse
+- `rerun`: whether runner stages bypass reuse from earlier submissions
 
 `pipeline_stage_executions`:
 
@@ -109,7 +109,7 @@ pipeline_runs ----< pipeline_stage_executions
 - `lane_index`
 - dataset sample identity
 - `job_id` for runner-backed stages
-- runner-backed stages may link to a matching completed job from another pipeline or a direct `job add`
+- runner-backed stages may link to a matching standalone job or completed job from another submission
 - local status/result fields for script stages
 
 ## Dataset Manifest Data
