@@ -9,6 +9,7 @@ from domain.batches import BatchPlan
 from app.config import OrchestratorConfig, RunnerDefinition
 from storage.db import (
     fetch_job_status,
+    mark_job_running,
     release_batch_pending_jobs,
     sync_dataset_state,
     write_job_dispatch_failure,
@@ -112,6 +113,8 @@ def _record_dispatch_failure_for_claimed_jobs(
 ) -> int:
     failures = 0
     for job in plan.jobs:
+        if fetch_job_status(config, job.job_id) != "running":
+            continue
         dispatch_failure = write_job_dispatch_failure(
             config,
             job_id=job.job_id,
@@ -262,6 +265,9 @@ def dispatch_batch(
     failures = 0
     runner_shutdown_requested = False
     window_controller = BatchWindowPolicyController(initial_window_state, window_state_provider)
+    recovering = any(
+        fetch_job_status(config, job.job_id) == "running" for job in plan.jobs
+    )
     try:
         try:
             endpoint = launcher.get_endpoint()
@@ -272,6 +278,7 @@ def dispatch_batch(
                 endpoint,
                 config.orchestrator.polling,
                 timeout_seconds=_runner_startup_timeout_seconds(runner),
+                allow_running=recovering,
             )
             runner_batch_id = _runner_batch_id(ready_status)
             if runner_batch_id and runner_batch_id != plan.batch_id:
@@ -313,13 +320,14 @@ def dispatch_batch(
         )
 
         for job in plan.jobs:
-            if fetch_job_status(config, job.job_id) != "pending":
+            job_status = fetch_job_status(config, job.job_id)
+            if job_status not in {"pending", "running"}:
                 logger.info(
                     _event_message(
                         "job_dispatch_skipped",
                         batch_id=plan.batch_id,
                         job_id=job.job_id,
-                        reason="job is no longer pending",
+                        reason="job is no longer active",
                     )
                 )
                 continue
@@ -335,6 +343,22 @@ def dispatch_batch(
                     )
                 )
                 break
+            if job_status == "pending":
+                if not mark_job_running(
+                    config,
+                    job_id=job.job_id,
+                    batch_id=plan.batch_id,
+                ):
+                    logger.info(
+                        _event_message(
+                            "job_dispatch_skipped",
+                            batch_id=plan.batch_id,
+                            job_id=job.job_id,
+                            reason="queued job could not enter running state",
+                        )
+                    )
+                    continue
+                job_status = "running"
 
             def _handle_job_poll(_: dict[str, Any]) -> dict[str, Any] | None:
                 nonlocal runner_shutdown_requested
@@ -386,14 +410,14 @@ def dispatch_batch(
                     )
                 return _window_policy_requeue(interrupt_policy)
 
-            recovered_terminal = _recover_terminal_if_available(
-                endpoint=endpoint,
-                plan=plan,
-                job=job,
-                polling=config.orchestrator.polling,
-                on_poll=_handle_job_poll,
-            )
             try:
+                recovered_terminal = _recover_terminal_if_available(
+                    endpoint=endpoint,
+                    plan=plan,
+                    job=job,
+                    polling=config.orchestrator.polling,
+                    on_poll=_handle_job_poll,
+                )
                 if recovered_terminal is not None:
                     if recovered_terminal.get("job_cancelled"):
                         _release_pending_jobs_for_batch(

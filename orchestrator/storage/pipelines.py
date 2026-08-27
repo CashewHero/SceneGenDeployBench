@@ -82,7 +82,7 @@ def fetch_pipeline_runs(
     *,
     active_only: bool = False,
 ) -> list[dict[str, Any]]:
-    where = "WHERE status = 'pending'" if active_only else ""
+    where = "WHERE status IN ('pending', 'running')" if active_only else ""
     with connect_database(config) as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
@@ -125,6 +125,26 @@ def fetch_pipeline_run(
                 (pipeline_run_id,),
             )
             return cur.fetchone()
+
+
+def mark_pipeline_run_running(
+    config: OrchestratorConfig,
+    pipeline_run_id: str,
+) -> bool:
+    now = utc_now_timestamp()
+    with connect_database(config) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE pipeline_runs
+                SET status = 'running',
+                    updated_at = %s
+                WHERE pipeline_run_id = %s
+                  AND status IN ('pending', 'running')
+                """,
+                (now, pipeline_run_id),
+            )
+            return cur.rowcount == 1
 
 
 def fetch_pipeline_stage_executions(
@@ -527,7 +547,8 @@ def mark_pipeline_run_terminal(
                 UPDATE pipeline_runs
                 SET status = %s, failure_message = %s,
                     updated_at = %s, completed_at = %s
-                WHERE pipeline_run_id = %s AND status = 'pending'
+                WHERE pipeline_run_id = %s
+                  AND status IN ('pending', 'running')
                 """,
                 (status, failure_message, now, now, pipeline_run_id),
             )
@@ -617,7 +638,8 @@ def _stop_pipeline_run(
                 UPDATE pipeline_runs
                 SET status = %s, updated_at = %s, completed_at = %s,
                     failure_message = %s
-                WHERE pipeline_run_id = %s AND status = 'pending'
+                WHERE pipeline_run_id = %s
+                  AND status IN ('pending', 'running')
                 """,
                 (status, now, now, run_message, pipeline_run_id),
             )

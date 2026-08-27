@@ -42,6 +42,7 @@ from storage.pipelines import (
     insert_pipeline_stage_job,
     insert_pipeline_stage_execution,
     mark_pipeline_job_outputs_removed,
+    mark_pipeline_run_running,
     mark_pipeline_run_terminal,
 )
 
@@ -1572,6 +1573,13 @@ def reconcile_pipeline_run(
     config: OrchestratorConfig,
     run: dict[str, Any],
 ) -> dict[str, Any]:
+    if not mark_pipeline_run_running(config, str(run["pipeline_run_id"])):
+        return {
+            "pipeline_run_id": run["pipeline_run_id"],
+            "materialized": 0,
+            "finished": False,
+        }
+    run["status"] = "running"
     definition = PipelineDefinition(
         name=str(run["pipeline_name"]),
         path=Path(str(run["config_path"])),

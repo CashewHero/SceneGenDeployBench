@@ -135,7 +135,7 @@ deploybench job update --job <job-id> --allow-outside-window
 deploybench job update --job <job-id> --disallow-outside-window
 ```
 
-Cancel pending jobs:
+Cancel pending or running jobs:
 
 ```bash
 deploybench job cancel --job <job-id>

@@ -55,7 +55,12 @@ def _sleep_for_retry(*, deadline: float, poll_seconds: float, max_interval_secon
     return True
 
 
-def wait_until_ready(base_url: str, polling: PollingConfig, timeout_seconds: float = 60.0) -> dict[str, Any]:
+def wait_until_ready(
+    base_url: str,
+    polling: PollingConfig,
+    timeout_seconds: float = 60.0,
+    allow_running: bool = False,
+) -> dict[str, Any]:
     deadline = time.time() + timeout_seconds
     last_error: Exception | None = None
     while True:
@@ -64,7 +69,10 @@ def wait_until_ready(base_url: str, polling: PollingConfig, timeout_seconds: flo
         except Exception as exc:
             last_error = exc
         else:
-            if status.get("state") in {"idle", "finished", "failed"}:
+            ready_states = {"idle", "finished", "failed"}
+            if allow_running:
+                ready_states.add("running")
+            if status.get("state") in ready_states:
                 return status
         if not _sleep_for_retry(
             deadline=deadline,

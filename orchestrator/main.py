@@ -184,7 +184,7 @@ def build_parser() -> argparse.ArgumentParser:
     job_list.add_argument("--finished-since", help="duration like 1h or timestamp")
     job_list.add_argument("--finished-until", help="duration like 1h or timestamp")
     job_list.add_argument("--failed", action="store_true", help="show only failed jobs")
-    job_list.add_argument("--active", action="store_true", help="show only pending jobs")
+    job_list.add_argument("--active", action="store_true", help="show pending and running jobs")
     job_list.add_argument("--completed", action="store_true", help="show only completed jobs")
 
     job_show = job_subparsers.add_parser("show", help="show one exact job")
@@ -197,7 +197,7 @@ def build_parser() -> argparse.ArgumentParser:
     job_update.add_argument("--allow-outside-window", action="store_true", help="allow this job to start outside active windows")
     job_update.add_argument("--disallow-outside-window", action="store_true", help="require this job to wait for an active window")
 
-    job_cancel = job_subparsers.add_parser("cancel", help="cancel pending jobs matched by filters")
+    job_cancel = job_subparsers.add_parser("cancel", help="cancel pending or running jobs matched by filters")
     job_cancel.add_argument("--job", action="append", dest="job_ids", default=[], help="exact job id")
     job_cancel.add_argument("--dataset", help="dataset path such as testset1, testset1/Gascola/P000, or testset1/.../sample.png")
     job_cancel.add_argument("--runner", help="runner name or exact runner selector such as name@version")
@@ -473,6 +473,7 @@ def handle_runner_show(args: argparse.Namespace) -> int:
         ("Jobs Completed", payload["job_counts"]["completed"]),
         ("Jobs Cancelled", payload["job_counts"]["cancelled"]),
         ("Jobs Pending", payload["job_counts"]["pending"]),
+        ("Jobs Running", payload["job_counts"]["running"]),
         ("Jobs Failed", payload["job_counts"]["failed"]),
     ]))
     window_rows = schedule_window_rows(scheduling)
@@ -560,6 +561,7 @@ def handle_dataset_show(args: argparse.Namespace) -> int:
         ("Jobs Completed", payload["job_counts"]["completed"]),
         ("Jobs Cancelled", payload["job_counts"]["cancelled"]),
         ("Jobs Pending", payload["job_counts"]["pending"]),
+        ("Jobs Running", payload["job_counts"]["running"]),
         ("Jobs Failed", payload["job_counts"]["failed"]),
     ]))
     if subset_rows:
@@ -738,6 +740,7 @@ def handle_job_list(args: argparse.Namespace) -> int:
         print(
             f"{prefix} {summary['job_count']} jobs total. "
             f"{summary['completed']} completed, {summary['pending']} pending, "
+            f"{summary['running']} running, "
             f"{summary['failed']} failed, {summary['cancelled']} cancelled."
         )
         if payload["rows"]:
@@ -753,13 +756,14 @@ def handle_job_list(args: argparse.Namespace) -> int:
                 "TOTAL": row["total"],
                 "COMPLETED": row["completed"],
                 "PENDING": row["pending"],
+                "RUNNING": row["running"],
                 "FAILED": row["failed"],
                 "CANCELLED": row["cancelled"],
                 "LAST UPDATE": format_relative_time(row["last_update"]),
             }
             for row in payload["rows"]
         ]
-        print(render_table(["DATASET", "RUNNER", "TOTAL", "COMPLETED", "PENDING", "FAILED", "CANCELLED", "LAST UPDATE"], table_rows))
+        print(render_table(["DATASET", "RUNNER", "TOTAL", "COMPLETED", "PENDING", "RUNNING", "FAILED", "CANCELLED", "LAST UPDATE"], table_rows))
         print_truncation_notice(len(payload["rows"]), matched_rows, label="group rows")
         return 0
     table_rows = [
@@ -823,13 +827,14 @@ def handle_job_add(args: argparse.Namespace) -> int:
                 "RUNNER": row["runner"],
                 "TOTAL": row["total"],
                 "PENDING": row["pending"],
+                "RUNNING": row["running"],
                 "FAILED": row["failed"],
                 "CANCELLED": row["cancelled"],
                 "LAST UPDATE": format_relative_time(row["last_update"]),
             }
             for row in payload["groups"]
         ]
-        print(render_table(["DATASET", "RUNNER", "TOTAL", "PENDING", "FAILED", "CANCELLED", "LAST UPDATE"], table_rows))
+        print(render_table(["DATASET", "RUNNER", "TOTAL", "PENDING", "RUNNING", "FAILED", "CANCELLED", "LAST UPDATE"], table_rows))
     if args.verbose and payload["job_rows"]:
         print()
         table_rows = [
@@ -871,13 +876,14 @@ def handle_job_update(args: argparse.Namespace) -> int:
                 "TOTAL": row["total"],
                 "COMPLETED": row["completed"],
                 "PENDING": row["pending"],
+                "RUNNING": row["running"],
                 "FAILED": row["failed"],
                 "CANCELLED": row["cancelled"],
                 "LAST UPDATE": format_relative_time(row["last_update"]),
             }
             for row in payload["groups"]
         ]
-        print(render_table(["DATASET", "RUNNER", "TOTAL", "COMPLETED", "PENDING", "FAILED", "CANCELLED", "LAST UPDATE"], table_rows))
+        print(render_table(["DATASET", "RUNNER", "TOTAL", "COMPLETED", "PENDING", "RUNNING", "FAILED", "CANCELLED", "LAST UPDATE"], table_rows))
     if args.verbose and payload["job_rows"]:
         print()
         print(render_table(["JOB"], [{"JOB": row["job_ref"]} for row in payload["job_rows"]]))
@@ -972,6 +978,7 @@ def handle_batch_list(args: argparse.Namespace) -> int:
             "STATE": row["state"],
             "JOBS": row["job_count"],
             "PENDING": row["pending"],
+            "RUNNING": row["running"],
             "COMPLETED": row["completed"],
             "FAILED": row["failed"],
             "CANCELLED": row["cancelled"],
@@ -979,7 +986,7 @@ def handle_batch_list(args: argparse.Namespace) -> int:
         }
         for row in limited_rows
     ]
-    print(render_table(["BATCH", "RUNNER", "STATE", "JOBS", "PENDING", "COMPLETED", "FAILED", "CANCELLED", "UPDATED"], table_rows))
+    print(render_table(["BATCH", "RUNNER", "STATE", "JOBS", "PENDING", "RUNNING", "COMPLETED", "FAILED", "CANCELLED", "UPDATED"], table_rows))
     print_truncation_notice(len(limited_rows), total_rows, label="batch rows")
     return 0
 
@@ -999,6 +1006,7 @@ def handle_batch_show(args: argparse.Namespace) -> int:
         ("Runner Endpoint", payload["runner_endpoint"] or "-"),
         ("Job Count", payload["job_count"]),
         ("Pending", payload["pending"]),
+        ("Running", payload["running"]),
         ("Completed", payload["completed"]),
         ("Failed", payload["failed"]),
         ("Cancelled", payload["cancelled"]),

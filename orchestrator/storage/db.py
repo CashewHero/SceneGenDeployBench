@@ -168,6 +168,7 @@ CREATE TABLE IF NOT EXISTS batches (
   job_ids_json JSONB NOT NULL DEFAULT '[]'::jsonb,
   job_count INTEGER NOT NULL DEFAULT 0,
   pending_job_count INTEGER NOT NULL DEFAULT 0,
+  running_job_count INTEGER NOT NULL DEFAULT 0,
   completed_job_count INTEGER NOT NULL DEFAULT 0,
   failed_job_count INTEGER NOT NULL DEFAULT 0,
   cancelled_job_count INTEGER NOT NULL DEFAULT 0,
@@ -178,6 +179,9 @@ CREATE TABLE IF NOT EXISTS batches (
 
 CREATE INDEX IF NOT EXISTS idx_batches_runner_updated
   ON batches (runner_selector, updated_at);
+
+ALTER TABLE batches
+  ADD COLUMN IF NOT EXISTS running_job_count INTEGER NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS job_metrics (
   id BIGSERIAL PRIMARY KEY,
@@ -236,10 +240,6 @@ ALTER TABLE pipeline_runs
 
 CREATE INDEX IF NOT EXISTS idx_pipeline_runs_status_created
   ON pipeline_runs (status, created_at);
-
-UPDATE pipeline_runs
-SET status = 'pending'
-WHERE status = 'running';
 
 CREATE TABLE IF NOT EXISTS pipeline_stage_executions (
   pipeline_stage_execution_id TEXT
@@ -820,7 +820,7 @@ def _job_where_clauses(
         params.append(["failed"])
     if active:
         clauses.append("status = ANY(%s)")
-        params.append(["pending"])
+        params.append(["pending", "running"])
     if completed:
         clauses.append("status = ANY(%s)")
         params.append(["completed"])
@@ -960,6 +960,7 @@ def fetch_job_rows(
                   output_dir,
                   created_at AT TIME ZONE 'UTC' AS created_at_utc,
                   updated_at AT TIME ZONE 'UTC' AS updated_at_utc,
+                  started_at AT TIME ZONE 'UTC' AS started_at_utc,
                   completed_at AT TIME ZONE 'UTC' AS completed_at_utc,
                   failure_code,
                   failure_message
@@ -1017,6 +1018,7 @@ def fetch_job_summary(
                   COUNT(*)::int AS job_count,
                   COUNT(*) FILTER (WHERE status = 'completed')::int AS completed,
                   COUNT(*) FILTER (WHERE status = 'pending')::int AS pending,
+                  COUNT(*) FILTER (WHERE status = 'running')::int AS running,
                   COUNT(*) FILTER (WHERE status = 'failed')::int AS failed,
                   COUNT(*) FILTER (WHERE status = 'cancelled')::int AS cancelled
                 FROM jobs
@@ -1029,6 +1031,7 @@ def fetch_job_summary(
         "job_count": int(row.get("job_count") or 0),
         "completed": int(row.get("completed") or 0),
         "pending": int(row.get("pending") or 0),
+        "running": int(row.get("running") or 0),
         "failed": int(row.get("failed") or 0),
         "cancelled": int(row.get("cancelled") or 0),
     }
@@ -1088,6 +1091,7 @@ def fetch_job_group_rows(
                   COUNT(*)::int AS total,
                   COUNT(*) FILTER (WHERE status = 'completed')::int AS completed,
                   COUNT(*) FILTER (WHERE status = 'pending')::int AS pending,
+                  COUNT(*) FILTER (WHERE status = 'running')::int AS running,
                   COUNT(*) FILTER (WHERE status = 'failed')::int AS failed,
                   COUNT(*) FILTER (WHERE status = 'cancelled')::int AS cancelled,
                   MAX(updated_at) AT TIME ZONE 'UTC' AS last_update_utc,
@@ -1168,6 +1172,33 @@ def fetch_job_status(config: OrchestratorConfig, job_id: str) -> str | None:
     return str(row["status"] if isinstance(row, dict) else row[0])
 
 
+def mark_job_running(
+    config: OrchestratorConfig,
+    *,
+    job_id: str,
+    batch_id: str,
+) -> bool:
+    now = utc_now_timestamp()
+    with connect_database(config) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE jobs
+                SET status = 'running',
+                    started_at = COALESCE(started_at, %s),
+                    updated_at = %s
+                WHERE job_id = %s
+                  AND batch_id = %s
+                  AND status = 'pending'
+                """,
+                (now, now, job_id, batch_id),
+            )
+            if cur.rowcount == 1:
+                refresh_batch_record(cur, batch_id, now=now)
+                return True
+            return False
+
+
 def refresh_batch_record(cur, batch_id: str, *, now: str) -> None:
     cur.execute(
         """
@@ -1184,18 +1215,20 @@ def refresh_batch_record(cur, batch_id: str, *, now: str) -> None:
         for row in raw_rows
     ]
     pending = sum(1 for row in rows if row["status"] == "pending")
+    running = sum(1 for row in rows if row["status"] == "running")
     completed = sum(1 for row in rows if row["status"] == "completed")
     failed = sum(1 for row in rows if row["status"] == "failed")
     cancelled = sum(1 for row in rows if row["status"] == "cancelled")
     # Empty batches happen when a failed dispatch releases or reassigns every
     # pending job. Close them instead of leaving stale "open" rows behind.
-    closed_at = now if pending == 0 else None
+    closed_at = now if pending == 0 and running == 0 else None
     cur.execute(
         """
         UPDATE batches
         SET job_ids_json = %s,
             job_count = %s,
             pending_job_count = %s,
+            running_job_count = %s,
             completed_job_count = %s,
             failed_job_count = %s,
             cancelled_job_count = %s,
@@ -1207,6 +1240,7 @@ def refresh_batch_record(cur, batch_id: str, *, now: str) -> None:
             _json_array([row["job_id"] for row in rows]),
             len(rows),
             pending,
+            running,
             completed,
             failed,
             cancelled,
@@ -1269,6 +1303,7 @@ def fetch_batch_row(config: OrchestratorConfig, batch_id: str) -> dict[str, Any]
                   job_ids_json,
                   job_count,
                   pending_job_count,
+                  running_job_count,
                   completed_job_count,
                   failed_job_count,
                   cancelled_job_count,
@@ -1298,6 +1333,7 @@ def fetch_batch_rows(config: OrchestratorConfig) -> list[dict[str, Any]]:
                   job_ids_json,
                   job_count,
                   pending_job_count,
+                  running_job_count,
                   completed_job_count,
                   failed_job_count,
                   cancelled_job_count,
@@ -2070,7 +2106,11 @@ def cancel_jobs(
                 params,
             )
             rows = list(cur.fetchall())
-            cancellable = [row["job_id"] for row in rows if row["status"] == "pending"]
+            cancellable = [
+                row["job_id"]
+                for row in rows
+                if row["status"] in {"pending", "running"}
+            ]
             if cancellable:
                 cur.execute(
                     """
@@ -2293,6 +2333,7 @@ def fetch_runner_usage_rows(config: OrchestratorConfig) -> list[dict[str, Any]]:
                   COUNT(*)::int AS total,
                   COUNT(*) FILTER (WHERE status = 'completed')::int AS completed,
                   COUNT(*) FILTER (WHERE status = 'pending')::int AS pending,
+                  COUNT(*) FILTER (WHERE status = 'running')::int AS running,
                   COUNT(*) FILTER (WHERE status = 'failed')::int AS failed,
                   COUNT(*) FILTER (WHERE status = 'cancelled')::int AS cancelled,
                   MAX(COALESCE(updated_at, created_at)) AT TIME ZONE 'UTC' AS last_seen_utc
@@ -2313,6 +2354,7 @@ def fetch_dataset_usage_rows(config: OrchestratorConfig) -> list[dict[str, Any]]
                   COUNT(*)::int AS total,
                   COUNT(*) FILTER (WHERE status = 'completed')::int AS completed,
                   COUNT(*) FILTER (WHERE status = 'pending')::int AS pending,
+                  COUNT(*) FILTER (WHERE status = 'running')::int AS running,
                   COUNT(*) FILTER (WHERE status = 'failed')::int AS failed,
                   COUNT(*) FILTER (WHERE status = 'cancelled')::int AS cancelled,
                   MAX(COALESCE(updated_at, created_at)) AT TIME ZONE 'UTC' AS last_job_utc
@@ -2359,6 +2401,7 @@ def fetch_latest_job_rows_by_sample(
                   output_dir,
                   created_at AT TIME ZONE 'UTC' AS created_at_utc,
                   updated_at AT TIME ZONE 'UTC' AS updated_at_utc,
+                  started_at AT TIME ZONE 'UTC' AS started_at_utc,
                   completed_at AT TIME ZONE 'UTC' AS completed_at_utc,
                   failure_code,
                   failure_message
@@ -2411,16 +2454,22 @@ def _claim_candidate_rows(
                 FROM (
                   SELECT DISTINCT ON (runner_name) *
                   FROM jobs
-                  WHERE status = 'pending'
-                    AND NOT (runner_selector = ANY(%s))
-                    AND (
-                      runner_selector = ANY(%s)
-                      OR (runner_selector = ANY(%s) AND allow_start_outside_window = TRUE)
-                      OR NOT (runner_selector = ANY(%s))
+                  WHERE status = 'running'
+                    OR (
+                      status = 'pending'
+                      AND NOT (runner_selector = ANY(%s))
+                      AND (
+                        runner_selector = ANY(%s)
+                        OR (runner_selector = ANY(%s) AND allow_start_outside_window = TRUE)
+                        OR NOT (runner_selector = ANY(%s))
+                      )
                     )
-                  ORDER BY runner_name, created_at, job_id
+                  ORDER BY runner_name,
+                           CASE status WHEN 'running' THEN 0 ELSE 1 END,
+                           created_at, job_id
                 ) oldest_by_runner
-                ORDER BY created_at, job_id
+                ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,
+                         created_at, job_id
                 LIMIT %s
                 """,
                 (
@@ -2463,11 +2512,12 @@ def _prioritize_claim_candidates(
     for position, runner_name in enumerate(recent_runner_names):
         recent_positions.setdefault(str(runner_name), position)
 
-    def priority(row: dict[str, Any]) -> tuple[int, int]:
+    def priority(row: dict[str, Any]) -> tuple[int, int, int]:
+        status_rank = 0 if row.get("status") == "running" else 1
         position = recent_positions.get(str(row.get("runner_name") or ""))
         if position is None:
-            return (0, 0)
-        return (1, -position)
+            return (status_rank, 0, 0)
+        return (status_rank, 1, -position)
 
     return sorted(candidates, key=priority)
 
@@ -2489,11 +2539,14 @@ def claimable_pending_runner_selectors(
                 """
                 SELECT DISTINCT runner_selector
                 FROM jobs
-                WHERE status = 'pending'
-                  AND (
-                    runner_selector = ANY(%s)
-                    OR (runner_selector = ANY(%s) AND allow_start_outside_window = TRUE)
-                    OR NOT (runner_selector = ANY(%s))
+                WHERE status = 'running'
+                  OR (
+                    status = 'pending'
+                    AND (
+                      runner_selector = ANY(%s)
+                      OR (runner_selector = ANY(%s) AND allow_start_outside_window = TRUE)
+                      OR NOT (runner_selector = ANY(%s))
+                    )
                   )
                 ORDER BY runner_selector
                 """,
@@ -2543,6 +2596,37 @@ def claim_pending_batch(
                         (now, now, first["job_id"]),
                     )
             continue
+        if first.get("status") == "running":
+            batch_id = str(first.get("batch_id") or "").strip()
+            if not batch_id:
+                write_job_dispatch_failure(
+                    config,
+                    job_id=str(first["job_id"]),
+                    batch_id="",
+                    output_dir=str(first.get("output_dir") or ""),
+                    error_message="running job has no durable batch id",
+                )
+                continue
+            batch_row = fetch_batch_row(config, batch_id)
+            runner_endpoint = (
+                str((batch_row or {}).get("runner_endpoint") or "").strip()
+                or None
+            )
+            return {
+                "batch_id": batch_id,
+                "runner_selector": runner.selector,
+                "runner_endpoint": runner_endpoint,
+                "window_state": {
+                    "active": True,
+                    "start_policy": None,
+                    "end_policy": None,
+                },
+                "jobs": [{
+                    "job_id": first["job_id"],
+                    "request_payload": dict(first["request_json"] or {}),
+                    "output_dir": str(first.get("output_dir") or ""),
+                }],
+            }
         window_state = evaluate_window_state(runner.scheduling or config.orchestrator.scheduling or {})
         if not window_state.active and not bool(first.get("allow_start_outside_window")):
             continue
@@ -2727,6 +2811,7 @@ def write_job_terminal_result(
                         artifacts_json = '[]'::jsonb,
                         artifact_count = 0,
                         metric_count = 0,
+                        started_at = NULL,
                         updated_at = %s,
                         completed_at = NULL,
                         failure_code = NULL,
@@ -2888,6 +2973,7 @@ def write_job_dispatch_failure(
                         artifacts_json = '[]'::jsonb,
                         artifact_count = 0,
                         metric_count = 0,
+                        started_at = NULL,
                         updated_at = %s,
                         completed_at = NULL,
                         failure_code = NULL,

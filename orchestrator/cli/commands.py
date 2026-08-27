@@ -97,6 +97,7 @@ class JobRecordView:
     source_job_id: str | None
     created_at: str | None
     updated_at: str | None
+    started_at: str | None
     completed_at: str | None
     output_dir: str | None
     failure_code: str | None
@@ -200,6 +201,7 @@ def _job_records_from_rows(rows: list[dict[str, Any]]) -> list[JobRecordView]:
                 source_job_id=row.get("source_job_id"),
                 created_at=_timestamp_value(row.get("created_at_utc")),
                 updated_at=updated_at,
+                started_at=_timestamp_value(row.get("started_at_utc")),
                 completed_at=_timestamp_value(row.get("completed_at_utc")),
                 output_dir=row.get("output_dir"),
                 failure_code=str(row.get("failure_code")) if row.get("failure_code") else None,
@@ -422,6 +424,8 @@ def _state_bucket(state: str) -> str:
         return "cancelled"
     if normalized in {"failed", "rejected"}:
         return "failed"
+    if normalized == "running":
+        return "running"
     return "pending"
 
 
@@ -461,6 +465,7 @@ def _group_job_records(records: list[JobRecordView], *, desc: bool = True) -> li
                 "total": 0,
                 "completed": 0,
                 "pending": 0,
+                "running": 0,
                 "failed": 0,
                 "cancelled": 0,
                 "last_update": None,
@@ -585,6 +590,7 @@ def list_jobs(config_path: str | None, options: JobListOptions) -> dict[str, Any
                 "total": int(row.get("total") or 0),
                 "completed": int(row.get("completed") or 0),
                 "pending": int(row.get("pending") or 0),
+                "running": int(row.get("running") or 0),
                 "failed": int(row.get("failed") or 0),
                 "cancelled": int(row.get("cancelled") or 0),
                 "last_update": _timestamp_value(row.get("last_update_utc")),
@@ -628,6 +634,7 @@ def show_job(config_path: str | None, job_id: str) -> dict[str, Any]:
         "source_job_id": record.source_job_id,
         "created_at": record.created_at,
         "updated_at": record.updated_at,
+        "started_at": record.started_at,
         "completed_at": record.completed_at,
         "output_dir": record.output_dir,
         "failure_code": record.failure_code,
@@ -671,6 +678,7 @@ def list_batches(
                 "runner_endpoint": str(row.get("runner_endpoint") or "").strip() or None,
                 "job_count": int(row.get("job_count") or 0),
                 "pending": int(row.get("pending_job_count") or 0),
+                "running": int(row.get("running_job_count") or 0),
                 "completed": int(row.get("completed_job_count") or 0),
                 "failed": int(row.get("failed_job_count") or 0),
                 "cancelled": int(row.get("cancelled_job_count") or 0),
@@ -705,6 +713,7 @@ def show_batch(config_path: str | None, batch_id: str) -> dict[str, Any]:
         "job_ids": list(row.get("job_ids_json") or []),
         "job_count": int(row.get("job_count") or 0),
         "pending": int(row.get("pending_job_count") or 0),
+        "running": int(row.get("running_job_count") or 0),
         "completed": int(row.get("completed_job_count") or 0),
         "failed": int(row.get("failed_job_count") or 0),
         "cancelled": int(row.get("cancelled_job_count") or 0),
@@ -766,6 +775,7 @@ def show_runner(config_path: str | None, runner_selector: str) -> dict[str, Any]
             "total": job_counts["job_count"],
             "completed": job_counts["completed"],
             "pending": job_counts["pending"],
+            "running": job_counts["running"],
             "failed": job_counts["failed"],
             "cancelled": job_counts["cancelled"],
         },
@@ -895,6 +905,7 @@ def show_dataset(config_path: str | None, target: str) -> dict[str, Any]:
             "total": job_counts["job_count"],
             "completed": job_counts["completed"],
             "pending": job_counts["pending"],
+            "running": job_counts["running"],
             "failed": job_counts["failed"],
             "cancelled": job_counts["cancelled"],
         },

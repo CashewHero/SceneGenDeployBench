@@ -60,6 +60,7 @@ pipeline_runs ----< pipeline_stage_executions
 - `result_json`
 - `artifacts_json`
 - `output_dir`
+- `started_at`
 - `failure_code`
 - `failure_message`
 
@@ -165,6 +166,7 @@ Job types:
 Job statuses:
 
 - `pending`
+- `running`
 - `completed`
 - `failed`
 - `cancelled`

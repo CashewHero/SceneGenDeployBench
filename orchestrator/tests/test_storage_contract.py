@@ -910,6 +910,53 @@ class StorageContractTests(unittest.TestCase):
             )
             sync_datasets.assert_not_called()
 
+    def test_running_job_recovery_resumes_matching_runner(self) -> None:
+        job = SimpleNamespace(
+            job_id="job-1",
+            request_payload={
+                "job": {
+                    "timeout_seconds": 3600,
+                }
+            },
+        )
+        plan = SimpleNamespace(batch_id="batch-1")
+        running = {
+            "batch_id": "batch-1",
+            "state": "running",
+            "current_job_id": "job-1",
+        }
+        terminal = {
+            **running,
+            "state": "finished",
+            "result": {"status": "completed"},
+        }
+        with (
+            patch.object(dispatch_execution, "get_status", return_value=running),
+            patch.object(
+                dispatch_execution,
+                "wait_for_terminal_state",
+                return_value=terminal,
+            ) as wait_terminal,
+        ):
+            recovered = dispatch_execution._recover_terminal_if_available(
+                endpoint="http://runner:58090",
+                plan=plan,
+                job=job,
+                polling=Mock(),
+            )
+
+        self.assertEqual(recovered, terminal)
+        wait_terminal.assert_called_once()
+
+    def test_schema_preserves_running_job_and_pipeline_state(self) -> None:
+        schema = db_storage.SCHEMA_SQL
+        self.assertIn("started_at TIMESTAMPTZ", schema)
+        self.assertIn("running_job_count INTEGER", schema)
+        self.assertNotIn(
+            "UPDATE pipeline_runs\nSET status = 'pending'",
+            schema,
+        )
+
     def test_targeted_dataset_rescan_passes_only_that_dataset(self) -> None:
         config = load_config(str(self.config_path))
         cursor = Mock()
