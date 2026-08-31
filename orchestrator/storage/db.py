@@ -488,19 +488,29 @@ def normalize_output_metadata(value: Any) -> dict[str, Any]:
         raise ValueError("output_metadata must be an object")
 
     metadata = dict(value)
-    if "scene_scale" not in metadata:
-        return metadata
-    raw_scale = metadata["scene_scale"]
-    if isinstance(raw_scale, bool) or not isinstance(raw_scale, (int, float)):
-        raise ValueError(
-            "output_metadata.scene_scale must be a nonzero finite number"
-        )
-    scene_scale = float(raw_scale)
-    if not math.isfinite(scene_scale) or scene_scale == 0:
-        raise ValueError(
-            "output_metadata.scene_scale must be a nonzero finite number"
-        )
-    metadata["scene_scale"] = scene_scale
+    if "scene_scale" in metadata:
+        raw_scale = metadata["scene_scale"]
+        if isinstance(raw_scale, bool) or not isinstance(raw_scale, (int, float)):
+            raise ValueError(
+                "output_metadata.scene_scale must be a nonzero finite number"
+            )
+        scene_scale = float(raw_scale)
+        if not math.isfinite(scene_scale) or scene_scale == 0:
+            raise ValueError(
+                "output_metadata.scene_scale must be a nonzero finite number"
+            )
+        metadata["scene_scale"] = scene_scale
+
+    if "scene_coordinate_system" in metadata:
+        raw_coordinate_system = metadata["scene_coordinate_system"]
+        if (
+            not isinstance(raw_coordinate_system, str)
+            or not raw_coordinate_system.strip()
+        ):
+            raise ValueError(
+                "output_metadata.scene_coordinate_system must be a nonempty string"
+            )
+        metadata["scene_coordinate_system"] = raw_coordinate_system.strip().upper()
     return metadata
 
 

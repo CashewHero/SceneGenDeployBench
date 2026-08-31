@@ -621,7 +621,10 @@ class PipelineContractTests(unittest.TestCase):
                             "sample-a": {"image": "/data/pipelines/a.png"},
                             "sample-b": {"table": "/data/pipelines/b.csv"},
                         },
-                        "output_metadata": {"scene_scale": 0.7},
+                        "output_metadata": {
+                            "scene_scale": 0.7,
+                            "scene_coordinate_system": "RUB",
+                        },
                     },
                 }
             ]
@@ -639,7 +642,10 @@ class PipelineContractTests(unittest.TestCase):
         )
         self.assertEqual(
             [source.output_metadata for source in sources],
-            [{"scene_scale": 0.7}, {"scene_scale": 0.7}],
+            [
+                {"scene_scale": 0.7, "scene_coordinate_system": "RUB"},
+                {"scene_scale": 0.7, "scene_coordinate_system": "RUB"},
+            ],
         )
         self.assertEqual(
             [source.identity["metadata_json"] for source in sources],

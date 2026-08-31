@@ -950,12 +950,15 @@ class StorageContractTests(unittest.TestCase):
                 source_job_id="job-generation",
                 allow_start_outside_window=False,
                 now="2026-08-06T00:00:00Z",
-                primary_output_metadata={"scene_scale": 0.7},
+                primary_output_metadata={
+                    "scene_scale": 0.7,
+                    "scene_coordinate_system": "rub",
+                },
             )
 
         self.assertEqual(
             request["job"]["primary_output_metadata"],
-            {"scene_scale": 0.7},
+            {"scene_scale": 0.7, "scene_coordinate_system": "RUB"},
         )
 
     def test_completed_dataset_download_rescans_only_when_enabled(
@@ -1145,6 +1148,20 @@ class StorageContractTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "scene_scale"):
                     db_storage.normalize_output_metadata({"scene_scale": value})
 
+    def test_scene_coordinate_system_is_normalized_and_validated(self) -> None:
+        self.assertEqual(
+            db_storage.normalize_output_metadata(
+                {"scene_scale": 0.7, "scene_coordinate_system": " rub "}
+            ),
+            {"scene_scale": 0.7, "scene_coordinate_system": "RUB"},
+        )
+        for value in (None, "", "   ", 1, {}):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "scene_coordinate_system"):
+                    db_storage.normalize_output_metadata(
+                        {"scene_coordinate_system": value}
+                    )
+
     def test_output_sample_stores_runner_output_metadata(self) -> None:
         cursor = Mock()
         with patch.object(
@@ -1168,14 +1185,17 @@ class StorageContractTests(unittest.TestCase):
                 },
                 output_dir="/data/output/generator/sample-1",
                 output_files={"sample-1": {"3dgs": "scene.ply"}},
-                output_metadata={"scene_scale": 0.7},
+                output_metadata={
+                    "scene_scale": 0.7,
+                    "scene_coordinate_system": "RUB",
+                },
                 now="2026-08-06T00:00:00Z",
             )
 
         parameters = cursor.execute.call_args.args[1]
         self.assertEqual(
             parameters[11]["output_metadata"],
-            {"scene_scale": 0.7},
+            {"scene_scale": 0.7, "scene_coordinate_system": "RUB"},
         )
 
     def test_script_run_options_are_explicit(self) -> None:
