@@ -18,6 +18,7 @@ from execution.pipelines import (
     _child_pipeline_config,
     _dependency_rows,
     _effective_retention,
+    _materialize_pipeline_stage,
     _resolve_runtime_value,
     _script_context,
     _script_execution_directory,
@@ -28,6 +29,47 @@ from execution.pipelines import (
 
 
 class PipelineContractTests(unittest.TestCase):
+    def test_nested_pipeline_stage_waits_for_active_child(self) -> None:
+        config = SimpleNamespace()
+        run = {"pipeline_run_id": "pipeline-parent"}
+        stage = {
+            "if": "success()",
+            "pipeline": "child_pipeline",
+            "timeout-minutes": 60,
+        }
+        row = {
+            "pipeline_stage_execution_id": "stage-child",
+            "stage_id": "child",
+            "lane_index": 0,
+            "status": "pending",
+            "result_json": {"child_pipeline_run_id": "pipeline-child"},
+        }
+
+        for child_status in ("pending", "running"):
+            with (
+                self.subTest(child_status=child_status),
+                patch(
+                    "execution.pipelines.fetch_pipeline_run",
+                    return_value={"status": child_status},
+                ),
+                patch(
+                    "execution.pipelines.finish_child_pipeline_stage"
+                ) as finish_child,
+            ):
+                changed = _materialize_pipeline_stage(
+                    config,
+                    run=run,
+                    stage_id="child",
+                    stage=stage,
+                    stages={"child": stage},
+                    lane_index=0,
+                    lane={},
+                    all_rows=[row],
+                )
+
+                self.assertFalse(changed)
+                finish_child.assert_not_called()
+
     def test_cli_validation_accepts_dynamic_nested_matrix(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             catalog = Path(temp_dir)

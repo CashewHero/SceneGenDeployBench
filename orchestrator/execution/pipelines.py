@@ -1228,7 +1228,7 @@ def _materialize_pipeline_stage(
                 pipeline_run_id=child_id,
             )
             return True
-        if child["status"] == "pending":
+        if child["status"] in {"pending", "running"}:
             if not _stage_timed_out(row, float(stage["timeout-minutes"])):
                 return False
             message = f"nested pipeline stage {stage_id!r} timed out"
