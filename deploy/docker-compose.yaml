@@ -13,6 +13,7 @@
 # POSTGRES_DB
 # POSTGRES_USER
 # POSTGRES_PASS
+# HF_TOKEN
 
 name: scenegendeploybench
 
@@ -39,8 +40,9 @@ services:
       PG_DB_PASSWORD: ${POSTGRES_PASS}
       ORCHESTRATOR_PORT: ${ORCHESTRATOR_PORT:-58080}
       PATH_CONFIG_SYSTEM: /app/config/system.yaml
+      HF_TOKEN: ${HF_TOKEN:-}
     ports:
-      - "${ORCHESTRATOR_PORT:-58080}:${ORCHESTRATOR_PORT:-58080}"
+      - "127.0.0.1:${ORCHESTRATOR_PORT:-58080}:${ORCHESTRATOR_PORT:-58080}"
     volumes:
       - ${PATH_OUTPUT}:/data/output
       - ${PATH_PIPELINES}:/data/pipelines

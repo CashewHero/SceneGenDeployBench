@@ -134,7 +134,7 @@ Per-job scheduling overrides are documented under [CLI Jobs](cli.md#jobs).
 - mounts datasets read-only for generators/evaluators, read-write for dataset downloaders, and output read-write
 - mounts `/data/model_cache` read-write for reusable model assets
 - passes `RUNNER_NAME`, `RUNNER_TYPE`, `RUNNER_VERSION`, `RUNNER_CONTRACT_VERSION`, `RUNNER_PORT`, plus `launcher.env`
-- passes variables listed in `launcher.env_passthrough`; values come from `orchestrator.runner_env` first, then the orchestrator process environment
+- passes variables listed in `launcher.env_passthrough` only when they are explicitly configured in `orchestrator.runner_env` config
 - YAML strings support `${VAR:-default}` environment expansion
 
 ## Storage Boundary

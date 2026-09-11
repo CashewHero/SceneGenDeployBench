@@ -475,10 +475,6 @@ class DockerRunnerLauncher:
             configured_value = configured_env.get(env_key)
             if configured_value not in {None, ""}:
                 env_payload[env_key] = str(configured_value)
-                continue
-            process_value = os.getenv(env_key)
-            if process_value not in {None, ""}:
-                env_payload[env_key] = process_value
         return [f"{key}={value}" for key, value in sorted(env_payload.items())]
 
     def _discover_host_context(self, client: _DockerEngineClient) -> _DockerHostContext:

@@ -53,6 +53,8 @@ docker compose --project-directory . --env-file deploy/.env -f deploy/docker-com
 
 The Compose stack mounts the Docker socket so the orchestrator can launch catalog entries with `launcher.driver: docker`.
 
+Put an optional Hugging Face token in `deploy/.env` as `HF_TOKEN=hf_...`, which is forwarded to runner that declare `launcher.env_passthrough: [HF_TOKEN]` in catalog.
+
 Check the service after Compose starts:
 
 ```bash

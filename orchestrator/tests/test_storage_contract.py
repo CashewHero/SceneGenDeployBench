@@ -149,6 +149,21 @@ class StorageContractTests(unittest.TestCase):
         self.assertIn("PATH_OUTPUT=/data/output", container["Env"])
         self.assertIn("PATH_PIPELINES=/data/pipelines", container["Env"])
 
+    def test_docker_runner_passthrough_only_uses_configured_runner_env(self) -> None:
+        config = load_config(str(self.config_path))
+        original = config.runners["test_runner@0.1.0"]
+        runner = replace(
+            original,
+            launcher=original.launcher | {"env_passthrough": ["HF_TOKEN", "PG_DB_PASSWORD"]},
+        )
+        launcher = DockerRunnerLauncher(
+            RunnerLaunchContext(runner=runner, runner_env={"HF_TOKEN": "configured-token"})
+        )
+        with patch.dict(os.environ, {"HF_TOKEN": "process-token", "PG_DB_PASSWORD": "process-password"}):
+            environment = dict(item.split("=", 1) for item in launcher._container_env())
+        self.assertEqual(environment["HF_TOKEN"], "configured-token")
+        self.assertNotIn("PG_DB_PASSWORD", environment)
+
     def test_docker_image_is_pulled_only_when_missing(self) -> None:
         client = _DockerEngineClient("/var/run/docker.sock")
         with (
