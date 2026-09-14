@@ -22,6 +22,7 @@ logger = logging.getLogger("scenegendeploybench.docker")
 _RUNNER_CONTAINER_PREFIX = "scenegendeploybench-run-"
 _RUNNER_CONTAINER_HASH_LENGTH = 12
 _DNS_LABEL_MAX_LENGTH = 63
+STALE_CREATED_CONTAINER_SECONDS = 300.0
 
 
 class _UnixSocketHTTPConnection(http.client.HTTPConnection):
@@ -183,6 +184,56 @@ def inspect_current_container(client: _DockerEngineClient) -> dict[str, Any]:
     return inspected
 
 
+def remove_stale_created_containers(
+    *,
+    socket_path: str = "/var/run/docker.sock",
+    min_age_seconds: float = STALE_CREATED_CONTAINER_SECONDS,
+    now_seconds: float | None = None,
+) -> int:
+    """Remove managed containers that Docker never managed to start."""
+    if min_age_seconds < 0:
+        raise ValueError("min_age_seconds must not be negative")
+    filters = quote(
+        json.dumps(
+            {
+                "label": ["scenegendeploybench.managed=true"],
+                "status": ["created"],
+            }
+        ),
+        safe="",
+    )
+    client = _DockerEngineClient(socket_path=socket_path)
+    containers = client.request(
+        "GET",
+        f"/containers/json?all=1&filters={filters}",
+    )
+    cutoff = (time.time() if now_seconds is None else now_seconds) - min_age_seconds
+    removed = 0
+    for container in containers or []:
+        if not isinstance(container, dict) or container.get("State") != "created":
+            continue
+        container_id = str(container.get("Id") or "").strip()
+        try:
+            created_at = float(container.get("Created"))
+        except (TypeError, ValueError):
+            continue
+        if not container_id or created_at > cutoff:
+            continue
+        try:
+            client.request(
+                "DELETE",
+                f"/containers/{quote(container_id, safe='')}?force=1",
+            )
+            removed += 1
+        except Exception as exc:
+            logger.warning(
+                "failed to remove stale created container %s: %s",
+                container_id,
+                exc,
+            )
+    return removed
+
+
 def mount_source_for_destination(
     mounts: list[Any],
     destination: str,
@@ -303,8 +354,12 @@ class DockerRunnerLauncher:
                         "DELETE",
                         f"/containers/{quote(container_id, safe='')}?force=1",
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning(
+                        "failed to remove runner container %s after startup failure: %s",
+                        container_id,
+                        exc,
+                    )
             raise
 
         self._container_id = container_id

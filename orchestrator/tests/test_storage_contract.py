@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -8,6 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, Mock, call, patch
+from urllib.parse import unquote
 
 from app.config import load_config
 from main import build_parser
@@ -16,6 +18,7 @@ from runner_launchers.docker import (
     DockerRunnerLauncher,
     _DockerEngineClient,
     _DockerHostContext,
+    remove_stale_created_containers,
 )
 from execution import dispatch as dispatch_execution
 from execution.script_run import (
@@ -181,6 +184,100 @@ class StorageContractTests(unittest.TestCase):
             pull_image.assert_called_once_with("example:0.1.0")
         self.assertIn("pulling it now", logs.output[0])
         self.assertIn("pull completed", logs.output[1])
+
+    def test_stale_created_container_cleanup_retries_failed_delete(self) -> None:
+        client = Mock()
+        stuck = {
+            "Id": "stuck-1",
+            "State": "created",
+            "Created": 100,
+        }
+        fresh = {
+            "Id": "fresh-1",
+            "State": "created",
+            "Created": 180,
+        }
+        client.request.side_effect = [
+            [stuck, fresh],
+            RuntimeError("Docker is unhealthy"),
+            [stuck, fresh],
+            None,
+        ]
+
+        with (
+            patch(
+                "runner_launchers.docker._DockerEngineClient",
+                return_value=client,
+            ),
+            self.assertLogs("scenegendeploybench.docker", level="WARNING"),
+        ):
+            first_removed = remove_stale_created_containers(
+                min_age_seconds=60,
+                now_seconds=200,
+            )
+            second_removed = remove_stale_created_containers(
+                min_age_seconds=60,
+                now_seconds=200,
+            )
+
+        self.assertEqual(first_removed, 0)
+        self.assertEqual(second_removed, 1)
+        first_list_path = client.request.call_args_list[0].args[1]
+        filters = json.loads(unquote(first_list_path.partition("filters=")[2]))
+        self.assertEqual(
+            filters,
+            {
+                "label": ["scenegendeploybench.managed=true"],
+                "status": ["created"],
+            },
+        )
+        self.assertEqual(
+            [
+                request
+                for request in client.request.call_args_list
+                if request.args[0] == "DELETE"
+            ],
+            [
+                call("DELETE", "/containers/stuck-1?force=1"),
+                call("DELETE", "/containers/stuck-1?force=1"),
+            ],
+        )
+
+    def test_docker_runner_start_preserves_error_when_cleanup_fails(self) -> None:
+        config = load_config(str(self.config_path))
+        runner = config.runners["test_runner@0.1.0"]
+        launcher = DockerRunnerLauncher(RunnerLaunchContext(runner=runner))
+        host = _DockerHostContext(
+            datasets_source="/host/datasets",
+            model_cache_source="/host/model_cache",
+            output_source="/host/output",
+            pipeline_source="/host/pipelines",
+            networks=("benchmark",),
+        )
+        client = Mock()
+        client.request.side_effect = [
+            {"Id": "runner-1"},
+            RuntimeError("nvidia runtime failed"),
+            RuntimeError("Docker is unhealthy"),
+        ]
+
+        with (
+            patch("runner_launchers.docker.os.path.exists", return_value=True),
+            patch(
+                "runner_launchers.docker._DockerEngineClient",
+                return_value=client,
+            ),
+            patch.object(launcher, "_discover_host_context", return_value=host),
+            self.assertLogs("scenegendeploybench.docker", level="WARNING") as logs,
+            self.assertRaisesRegex(RuntimeError, "nvidia runtime failed"),
+        ):
+            launcher.start_runner()
+
+        self.assertEqual(
+            client.request.call_args_list[-1],
+            call("DELETE", "/containers/runner-1?force=1"),
+        )
+        self.assertIn("failed to remove runner container runner-1", logs.output[0])
 
     def test_docker_preflight_skips_probe_without_gpu_request(self) -> None:
         config = load_config(str(self.config_path))

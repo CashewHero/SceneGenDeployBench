@@ -31,6 +31,7 @@ from execution.script_run import remove_script_containers
 from domain.scheduling import WindowState, evaluate_window_state
 from runner_launchers import create_runner_launcher
 from runner_launchers.base import LauncherPreflightResult, RunnerLaunchContext
+from runner_launchers.docker import remove_stale_created_containers
 
 logger = logging.getLogger("scenegendeploybench.orchestrator.service")
 STARTUP_DB_MAX_ATTEMPTS = 60
@@ -240,6 +241,33 @@ def _preflight_pending_runners(
     return results
 
 
+def _cleanup_stale_created_containers(config) -> None:
+    socket_paths = {
+        str(runner.launcher.get("socket_path") or "/var/run/docker.sock").strip()
+        for runner in config.runners.values()
+        if str(runner.launcher.get("driver") or "").strip() == "docker"
+    }
+    for socket_path in sorted(socket_paths):
+        try:
+            removed = remove_stale_created_containers(socket_path=socket_path)
+            if removed:
+                logger.info(
+                    event_message(
+                        "stale_created_containers_removed",
+                        container_count=removed,
+                        socket_path=socket_path,
+                    )
+                )
+        except Exception as exc:
+            logger.warning(
+                event_message(
+                    "stale_created_container_cleanup_failed",
+                    error=str(exc),
+                    socket_path=socket_path,
+                )
+            )
+
+
 def scheduler_loop(server: "OrchestratorHTTPServer") -> None:
     busy_sleep_seconds = 1
     previously_blocked: dict[str, LauncherPreflightResult] = {}
@@ -256,6 +284,7 @@ def scheduler_loop(server: "OrchestratorHTTPServer") -> None:
 
         try:
             config = load_runtime_config(server.orchestrator.config_path)
+            _cleanup_stale_created_containers(config)
             server.orchestrator.set_window_state(_any_runner_window_active(config))
             if not server.orchestrator.start_operation("scheduler-reconcile"):
                 time.sleep(busy_sleep_seconds)
