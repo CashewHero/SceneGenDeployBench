@@ -152,7 +152,7 @@ All stage types share these scheduling fields:
 | `needs` | `[]` | One dependency stage id or a list of ids |
 | `if` | `success()` | `success()` skips after a failed dependency; `always()` still runs |
 | `scope` | `matrix` | `matrix` runs per lane; `pipeline` runs once for the complete pipeline |
-| `timeout-minutes` | `60` | Maximum stage execution time |
+| `timeout-minutes` | Runner timeout for runner stages, `60` otherwise | Maximum stage execution time |
 
 Runner and script stages also accept `retention`:
 

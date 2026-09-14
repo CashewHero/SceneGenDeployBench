@@ -884,7 +884,7 @@ def _materialize_runner_stage(
             },
             inputs={},
             parameters=parameters,
-            timeout_seconds=int(float(stage["timeout-minutes"]) * 60),
+            timeout_seconds=_runner_stage_timeout_seconds(stage, runner),
             allow_start_outside_window=bool(run["allow_start_outside_window"]),
             job_type="dataset_download",
             source_job_id=None,
@@ -979,7 +979,7 @@ def _materialize_runner_stage(
             identity=identity,
             inputs=inputs,
             parameters=parameters,
-            timeout_seconds=int(float(stage["timeout-minutes"]) * 60),
+            timeout_seconds=_runner_stage_timeout_seconds(stage, runner),
             allow_start_outside_window=bool(run["allow_start_outside_window"]),
             job_type=(
                 "evaluation" if runner.kind == "evaluator" else "generation"
@@ -1001,6 +1001,21 @@ def _materialize_runner_stage(
         )
         created = True
     return created
+
+
+def _runner_stage_timeout_seconds(
+    stage: dict[str, Any],
+    runner: RunnerDefinition,
+) -> int:
+    timeout_minutes = stage.get("timeout-minutes")
+    if timeout_minutes is None:
+        timeout_minutes = runner.scheduling.get("job_timeout_minutes")
+    if timeout_minutes is None:
+        timeout_minutes = 60
+    timeout_minutes = float(timeout_minutes)
+    if timeout_minutes <= 0:
+        raise ValueError("runner stage timeout must be greater than 0")
+    return int(timeout_minutes * 60)
 
 
 def _child_pipeline_config(

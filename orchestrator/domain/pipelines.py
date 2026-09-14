@@ -342,8 +342,9 @@ def load_pipeline(path: Path) -> PipelineDefinition:
             raise ValueError(
                 f"{path}.stages.{stage_id}.if must be success() or always()"
             )
-        timeout = float(stage.get("timeout-minutes") or 60)
-        if timeout <= 0:
+        raw_timeout = stage.get("timeout-minutes")
+        timeout = float(raw_timeout) if raw_timeout is not None else None
+        if timeout is not None and timeout <= 0:
             raise ValueError(
                 f"{path}.stages.{stage_id}.timeout-minutes must be greater than 0"
             )
@@ -352,8 +353,13 @@ def load_pipeline(path: Path) -> PipelineDefinition:
             **stage,
             "needs": needs,
             "if": condition,
-            "timeout-minutes": timeout,
         }
+        if timeout is not None:
+            normalized["timeout-minutes"] = timeout
+        elif has_runner:
+            normalized.pop("timeout-minutes", None)
+        else:
+            normalized["timeout-minutes"] = 60.0
         scope = str(stage.get("scope") or "matrix").strip()
         if scope not in {"pipeline", "matrix"}:
             raise ValueError(

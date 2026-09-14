@@ -20,6 +20,7 @@ from execution.pipelines import (
     _effective_retention,
     _materialize_pipeline_stage,
     _resolve_runtime_value,
+    _runner_stage_timeout_seconds,
     _script_context,
     _script_execution_directory,
     _stage_execution_lanes,
@@ -29,6 +30,52 @@ from execution.pipelines import (
 
 
 class PipelineContractTests(unittest.TestCase):
+    def test_runner_stage_uses_runner_timeout_when_stage_omits_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "timeouts.yaml"
+            path.write_text(
+                """
+                pipeline_version: 1
+                name: timeouts
+                stages:
+                  runner_default:
+                    runner: test_runner
+                  runner_override:
+                    runner: test_runner
+                    timeout-minutes: 7
+                  script_default:
+                    image: python:3
+                    run: [python, -c, pass]
+                """,
+                encoding="utf-8",
+            )
+
+            definition = load_pipeline(path)
+
+        runner = SimpleNamespace(scheduling={"job_timeout_minutes": 120})
+        self.assertNotIn(
+            "timeout-minutes",
+            definition.stages["runner_default"],
+        )
+        self.assertEqual(
+            _runner_stage_timeout_seconds(
+                definition.stages["runner_default"],
+                runner,
+            ),
+            7200,
+        )
+        self.assertEqual(
+            _runner_stage_timeout_seconds(
+                definition.stages["runner_override"],
+                runner,
+            ),
+            420,
+        )
+        self.assertEqual(
+            definition.stages["script_default"]["timeout-minutes"],
+            60,
+        )
+
     def test_nested_pipeline_stage_waits_for_active_child(self) -> None:
         config = SimpleNamespace()
         run = {"pipeline_run_id": "pipeline-parent"}
