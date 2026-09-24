@@ -14,6 +14,8 @@ Reuse `job_logging.py` and `measurements.py`. Keep `server.py` stable unless the
 
 Do not assume that an orchestrator source tree exists in the target repository. Do not write to PostgreSQL. Do not put private credentials, datasets, caches, or local model weights in the image or repository.
 
+When adapting a model, if the original repo supports multiple GPU, support it in the wrapper.
+
 ## Inspect Before Editing
 
 Identify:
@@ -90,7 +92,7 @@ Create one YAML under `runner_wrapper/config/runners/` from the matching example
 - `launcher.endpoint.port`
 - `launcher.env` and `launcher.env_passthrough`
 - optional Docker settings such as `launcher.gpus` and `launcher.user`
-- `scheduling.max_batch_size`, `max_attempts`, `job_timeout_minutes`, and `startup_timeout_minutes`
+- use reseaonable `scheduling.max_batch_size`, `max_attempts`, `job_timeout_minutes`, and `startup_timeout_minutes` for the model as an example config for real deployments
 
 Catalog input config example:
 
