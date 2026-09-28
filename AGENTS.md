@@ -16,6 +16,8 @@ Do not assume that an orchestrator source tree exists in the target repository. 
 
 When adapting a model, if the original repo supports multiple GPU, support it in the wrapper.
 
+Default the runner to the upstream repository's intended inference configuration, including its documented model weights, resolution, step count, and other quality settings. When the upstream code already has simple lower-cost controls, expose a small set of job parameters for lighter runs, such as reduced resolution, fewer steps, or lighter weights. Keep this optional configuration simple. Do not add separate runners or complex abstractions unless the modes have materially different contracts or behavior.
+
 ## Inspect Before Editing
 
 Identify:
