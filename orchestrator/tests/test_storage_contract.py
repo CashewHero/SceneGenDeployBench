@@ -125,6 +125,51 @@ class StorageContractTests(unittest.TestCase):
             _job_output_dir(config, row),
             Path("/data/output/test_runner@0.1.0/dataset-a/subset-a/sample-1"),
         )
+
+    def test_evaluator_output_path_uses_upstream_runner(self) -> None:
+        config = load_config(str(self.config_path))
+        row = {
+            "runner_name": "3dgs_scale_calibration",
+            "runner_version": "0.1.9",
+            "upstream_runner_selector": "scene_generator@1.2.3",
+            "dataset_name": "dataset-a",
+            "sample_metadata_json": {},
+            "subset_key": "subset-a",
+            "external_key": "subset-a/sample-1",
+            "sample_id": "sample-1",
+            "job_id": "job-evaluator",
+        }
+        self.assertEqual(
+            _job_output_dir(config, row),
+            Path(
+                "/data/output/3dgs_scale_calibration@0.1.9/"
+                "scene_generator@1.2.3/dataset-a/subset-a/sample-1"
+            ),
+        )
+
+    def test_upstream_runner_overrides_inherited_source_metadata(self) -> None:
+        config = load_config(str(self.config_path))
+        row = {
+            "runner_name": "3dgs_scale_calibration",
+            "runner_version": "0.1.9",
+            "upstream_runner_selector": "current_generator@2.0.0",
+            "dataset_name": "dataset-a",
+            "sample_metadata_json": {
+                "source_runner_selector": "older_generator@1.0.0"
+            },
+            "subset_key": "",
+            "external_key": "sample-1",
+            "sample_id": "sample-1",
+            "job_id": "job-evaluator",
+        }
+        self.assertEqual(
+            _job_output_dir(config, row),
+            Path(
+                "/data/output/3dgs_scale_calibration@0.1.9/"
+                "current_generator@2.0.0/dataset-a/sample-1"
+            ),
+        )
+
     def test_docker_runner_receives_all_shared_mounts(self) -> None:
         config = load_config(str(self.config_path))
         runner = config.runners["test_runner@0.1.0"]

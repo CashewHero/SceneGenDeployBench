@@ -361,7 +361,11 @@ def _job_output_dir(config: OrchestratorConfig, row: dict[str, Any]) -> Path:
     runner_selector = f"{row['runner_name']}@{row['runner_version']}"
     dataset_name = str(row["dataset_name"]).strip() or "dataset"
     sample_metadata = dict(row.get("sample_metadata_json") or {})
-    source_runner_selector = str(sample_metadata.get("source_runner_selector") or "").strip()
+    source_runner_selector = str(
+        row.get("upstream_runner_selector")
+        or sample_metadata.get("source_runner_selector")
+        or ""
+    ).strip()
     subset_parts = _normalized_output_parts(row.get("subset_key"))
     if not subset_parts:
         external_parts = _normalized_output_parts(row.get("external_key"))
@@ -2713,12 +2717,18 @@ def claim_pending_batch(
                     candidate_filters.append("COALESCE(batch_id, '') = ''")
                 cur.execute(
                     f"""
-                    SELECT *
+                    SELECT
+                      jobs.*,
+                      (
+                        SELECT upstream.runner_selector
+                        FROM jobs AS upstream
+                        WHERE upstream.job_id = jobs.source_job_id
+                      ) AS upstream_runner_selector
                     FROM jobs
                     WHERE {' AND '.join(candidate_filters)}
                     ORDER BY created_at
                     LIMIT %s
-                    FOR UPDATE SKIP LOCKED
+                    FOR UPDATE OF jobs SKIP LOCKED
                     """,
                     [*candidate_params, max_batch_size],
                 )

@@ -952,7 +952,7 @@ def _materialize_runner_stage(
         identity = source.identity
         if identity["external_key"] in existing:
             continue
-        inputs, source_job_id = _runner_inputs(
+        inputs, input_source_job_id = _runner_inputs(
             config,
             runner=runner,
             stage={
@@ -984,7 +984,7 @@ def _materialize_runner_stage(
             job_type=(
                 "evaluation" if runner.kind == "evaluator" else "generation"
             ),
-            source_job_id=source_job_id,
+            source_job_id=source.source_job_id or input_source_job_id,
             primary_output_metadata=source.output_metadata,
             rerun=bool(run.get("rerun", False)),
         )
