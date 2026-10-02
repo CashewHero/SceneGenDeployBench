@@ -14,7 +14,7 @@ Reuse `job_logging.py` and `measurements.py`. Keep `server.py` stable unless the
 
 Do not assume that an orchestrator source tree exists in the target repository. Do not write to PostgreSQL. Do not put private credentials, datasets, caches, or local model weights in the image or repository.
 
-When adapting a model, if the original repo supports multiple GPU, support it in the wrapper.
+When adapting a model, use the repo's flow, don't build custom code unless necessary. If the original repo supports multiple GPU, support it in the wrapper.
 
 Default the runner to the upstream repository's intended inference configuration, including its documented model weights, resolution, step count, and other quality settings. When the upstream code already has simple lower-cost controls, expose a small set of job parameters for lighter runs, such as reduced resolution, fewer steps, or lighter weights. Keep this optional configuration simple. Do not add separate runners or complex abstractions unless the modes have materially different contracts or behavior.
 
